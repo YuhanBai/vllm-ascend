@@ -15,8 +15,15 @@ class AscendSampler(Sampler):
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler()
 
+    def set_q_event(self, q, event):
+        self.topk_topp_sampler.set_q_event(q, event)
 
 class AscendTopKTopPSampler(TopKTopPSampler):
+
+    
+    def set_q_event(self, q, event):
+        self.q = q
+        self.exp_event = event
 
     def _apply_top_k_top_p(
         self,
@@ -71,4 +78,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
+        if getattr(self, "q", None) is not None:
+            return self.random_sample(probs, self.q, self.exp_event), logits_to_return
         return random_sample(probs, generators), logits_to_return
+
+    def random_sample(self, probs, q, exp_event):
+        exp_event.synchronize()
+        return probs.div(q).argmax(dim=-1).view(-1)

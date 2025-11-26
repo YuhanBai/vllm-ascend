@@ -604,6 +604,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: EVS Support (Video tokens pruning) (see vllm#22980)
         self.is_multimodal_pruning_enabled = False
 
+        if envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONENTIAL and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+            logger.info("***** Enable async exponential while model executing!")
+            self._async_sampling_exp_stream = torch.npu.Stream()
+            self._async_sampling_exp_event = torch.npu.Event()
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -2317,6 +2322,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(batch_descriptor)
 
+        if envs_ascend.VLLM_ASCEND_ENABLE_ASYNC_EXPONETIAL and envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+            default_stream = torch.npu.current_stream()
+            self._do_async_exponential(default_stream=default_stream, logits_indices=logits_indices)
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with set_ascend_forward_context(
@@ -4422,3 +4430,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids_pcp_full_cpu[:total_num_scheduled_tokens_pcp_full],
             non_blocking=True,
         )
+
+    def _do_async_exponential(self, default_stream, logits_indices):
+        with torch.npu.stream(self._async_sampling_exp_stream):
+            self._async_sampling_exp_stream.wait_stream(default_stream)
+            b_s = logits_indices.shape[0]
+            head_dim = self.model_config.get_vocab_size()
+            q = torch.empty((b_s, head_dim), device="npu", dtype=torch.float32)
+            generators = self.input_batch.sampling_metadata.generators
+            if len(generators) != q.shape[0]:
+                q.exponential_()
+            if generators:
+                for i, generator in generators.items():
+                    q[i].exponential_(generator=generator)
+            self._async_sampling_exp_event.record()
+        self.sampler.set_q_event(q, self._async_sampling_exp_event)

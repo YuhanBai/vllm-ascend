@@ -75,8 +75,13 @@ def _addrmsnorm_forward_oot(
             x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                           self.variance_epsilon)
         else:
-            x, _, residual = torch_npu.npu_add_rms_norm(
-                x, residual, self.weight, self.variance_epsilon)
+            # x, _, residual = torch_npu.npu_add_rms_norm(
+            #     x, residual, self.weight, self.variance_epsilon)
+            orig_dtype = residual.dtype
+            x = x + residual.to(x.dtype)
+            residual = x.to(orig_dtype)
+            x, _ = torch_npu.npu_rms_norm(x, self.weight,
+                                          self.variance_epsilon)
         if bias is not None:
             x.add_(bias)
     torch.ops.vllm.maybe_wait_prefetch_done(x)
@@ -205,8 +210,13 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
                 x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
                                               self.variance_epsilon)
             else:
-                x, _, residual = torch_npu.npu_add_rms_norm(
-                    x, residual, 1.0 + self.weight, self.variance_epsilon)
+                # x, _, residual = torch_npu.npu_add_rms_norm(
+                #     x, residual, 1.0 + self.weight, self.variance_epsilon)
+                orig_dtype = residual.dtype
+                x = x + residual.to(x.dtype)
+                residual = x.to(orig_dtype)
+                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                              self.variance_epsilon)
             return x, residual
 
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,

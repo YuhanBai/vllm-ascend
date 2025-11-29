@@ -46,6 +46,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
                                aligned_16, get_ascend_device_type, nd_to_nz_2d,
                                nd_to_nz_spec, prefill_context_parallel_enable,
                                weak_ref_tensors)
+import vllm_ascend.envs as envs_ascend
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -713,37 +714,41 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
-        n_head = self.num_heads
-        shape_order = "TND"
-        scale = self.scale
-        mask = mask.to(torch.uint8)
-        output = torch_npu.npu_fusion_attention(
-            query=query,
-            key=key,
-            value=value,
-            head_num=n_head,
-            input_layout=shape_order,
-            pse=None,
-            padding_mask=None,
-            atten_mask=mask,
-            scale=scale,
-            inner_precise=0,
-            sparse_mode=1,
-            actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
-            actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
-        )[0]
-        # torch_npu._npu_flash_attention(query=query,
-        #                                key=key,
-        #                                value=value,
-        #                                mask=mask,
-        #                                seq_len=attn_metadata.seq_lens,
-        #                                scale_value=self.scale,
-        #                                num_heads=self.num_heads,
-        #                                num_kv_heads=self.num_kv_heads,
-        #                                out=output)
+        if envs_ascend.T_I_CONSISTANCY:
+            n_head = self.num_heads
+            shape_order = "TND"
+            scale = self.scale
+            mask = mask.to(torch.uint8)
+            output = torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                head_num=n_head,
+                input_layout=shape_order,
+                pse=None,
+                padding_mask=None,
+                atten_mask=mask,
+                scale=scale,
+                inner_precise=0,
+                sparse_mode=1,
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+            )[0]
+            assert output is not None
+            return output
+        
+        torch_npu._npu_flash_attention(query=query,
+                                       key=key,
+                                       value=value,
+                                       mask=mask,
+                                       seq_len=attn_metadata.seq_lens,
+                                       scale_value=self.scale,
+                                       num_heads=self.num_heads,
+                                       num_kv_heads=self.num_kv_heads,
+                                       out=output)
         assert output is not None
-        return output
-        # return output[:num_tokens]
+        # return output
+        return output[:num_tokens]
 
     def _forward_prefill_cache_hit(
         self,

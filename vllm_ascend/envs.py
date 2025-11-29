@@ -176,6 +176,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    "T_I_CONSISTANCY":
+    lambda: int(os.getenv("T_I_CONSISTANCY", 1)),
 }
 
 # end-env-vars-definition

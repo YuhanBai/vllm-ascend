@@ -21,6 +21,7 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
+import vllm_ascend.envs as envs_ascend
 
 
 def _addrmsnorm_forward_oot(
@@ -68,20 +69,16 @@ def _addrmsnorm_forward_oot(
             )
 
     else:
-        if get_ascend_device_type() == AscendDeviceType._310P:
+        if get_ascend_device_type() == AscendDeviceType._310P or envs_ascend.T_I_CONSISTANCY:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)
             x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                           self.variance_epsilon)
         else:
-            # x, _, residual = torch_npu.npu_add_rms_norm(
-            #     x, residual, self.weight, self.variance_epsilon)
-            orig_dtype = residual.dtype
-            x = x + residual.to(x.dtype)
-            residual = x.to(orig_dtype)
-            x, _ = torch_npu.npu_rms_norm(x, self.weight,
-                                          self.variance_epsilon)
+            x, _, residual = torch_npu.npu_add_rms_norm(
+                x, residual, self.weight, self.variance_epsilon)
+
         if bias is not None:
             x.add_(bias)
     torch.ops.vllm.maybe_wait_prefetch_done(x)
@@ -203,20 +200,15 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if get_ascend_device_type() == AscendDeviceType._310P:
+            if get_ascend_device_type() == AscendDeviceType._310P or envs_ascend.T_I_CONSISTANCY:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)
                 x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
                                               self.variance_epsilon)
             else:
-                # x, _, residual = torch_npu.npu_add_rms_norm(
-                #     x, residual, 1.0 + self.weight, self.variance_epsilon)
-                orig_dtype = residual.dtype
-                x = x + residual.to(x.dtype)
-                residual = x.to(orig_dtype)
-                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
-                                              self.variance_epsilon)
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,

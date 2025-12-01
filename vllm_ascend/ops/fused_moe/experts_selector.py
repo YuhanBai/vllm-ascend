@@ -19,7 +19,7 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
-import vllm_ascend as envs_ascend
+import vllm_ascend.envs as envs_ascend
 
 
 def select_experts(hidden_states: torch.Tensor,

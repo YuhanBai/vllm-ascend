@@ -62,18 +62,33 @@ def select_experts(hidden_states: torch.Tensor,
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
     if not envs_ascend.T_I_CONSISTANCY: # Hard change need to be fix
-        topk_weights, topk_ids = _select_experts_with_fusion_ops(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            topk_group=topk_group,
-            renormalize=renormalize,
-            e_score_correction_bias=e_score_correction_bias,
-            num_expert_group=num_expert_group,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            global_num_experts=global_num_experts)
+        if custom_routing_function is None:
+            topk_weights, topk_ids = _select_experts_with_fusion_ops(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=top_k,
+                use_grouped_topk=use_grouped_topk,
+                topk_group=topk_group,
+                renormalize=renormalize,
+                e_score_correction_bias=e_score_correction_bias,
+                num_expert_group=num_expert_group,
+                scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
+                global_num_experts=global_num_experts)
+        else:
+            topk_weights, topk_ids = _native_select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=top_k,
+                use_grouped_topk=use_grouped_topk,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                global_num_experts=global_num_experts,
+            )
     else:
         topk_weights, topk_ids = _native_select_experts(
             hidden_states=hidden_states,

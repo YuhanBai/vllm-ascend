@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)
@@ -46,7 +47,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendDeviceType,
                                aligned_16, get_ascend_device_type, nd_to_nz_2d,
                                nd_to_nz_spec, prefill_context_parallel_enable,
                                weak_ref_tensors)
-import vllm_ascend.envs as envs_ascend
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -738,7 +738,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )[0]
             assert output is not None
             return output
-        
+
         torch_npu._npu_flash_attention(query=query,
                                        key=key,
                                        value=value,

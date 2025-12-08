@@ -715,6 +715,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                              ACL_FORMAT_FRACTAL_NZ)
 
         if envs_ascend.T_I_CONSISTANCY:
+            # If the train-inference-consistancy is enable
+            # Use npu_fusion_attention rather than _npu_flash_attention
             n_head = self.num_heads
             shape_order = "TND"
             scale = self.scale

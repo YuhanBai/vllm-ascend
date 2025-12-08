@@ -61,7 +61,7 @@ def select_experts(hidden_states: torch.Tensor,
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
-    if not envs_ascend.T_I_CONSISTANCY: # Hard change need to be fix
+    if not envs_ascend.T_I_CONSISTENCY: # Hard change need to be fix
         if custom_routing_function is None:
             topk_weights, topk_ids = _select_experts_with_fusion_ops(
                 hidden_states=hidden_states,

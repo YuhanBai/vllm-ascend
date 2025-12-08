@@ -69,7 +69,7 @@ def _addrmsnorm_forward_oot(
             )
 
     else:
-        if get_ascend_device_type() == AscendDeviceType._310P or envs_ascend.T_I_CONSISTANCY:
+        if get_ascend_device_type() == AscendDeviceType._310P or envs_ascend.T_I_CONSISTENCY:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)
@@ -200,7 +200,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if get_ascend_device_type() == AscendDeviceType._310P or envs_ascend.T_I_CONSISTANCY:
+            if get_ascend_device_type() == AscendDeviceType._310P or envs_ascend.T_I_CONSISTENCY:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)

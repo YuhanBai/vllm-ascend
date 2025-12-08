@@ -714,7 +714,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
-        if envs_ascend.T_I_CONSISTANCY:
+        if envs_ascend.T_I_CONSISTENCY:
             # If the train-inference-consistancy is enable
             # Use npu_fusion_attention rather than _npu_flash_attention
             n_head = self.num_heads

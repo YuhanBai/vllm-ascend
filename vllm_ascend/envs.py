@@ -177,8 +177,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "DYNAMIC_EPLB":
     lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Whether to enable train-inference-consistancy.
-    "T_I_CONSISTANCY":
-    lambda: bool(int(os.getenv("T_I_CONSISTANCY", "0"))),
+    "T_I_CONSISTENCY":
+    lambda: bool(int(os.getenv("T_I_CONSISTENCY", "0"))),
 }
 
 # end-env-vars-definition

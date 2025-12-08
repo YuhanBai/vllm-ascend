@@ -70,8 +70,7 @@ def _addrmsnorm_forward_oot(
             )
 
     else:
-        if get_ascend_device_type(
-        ) == AscendDeviceType._310P or \
+        if get_ascend_device_type() == AscendDeviceType._310P or \
                 envs_ascend.T_I_CONSISTENCY:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)

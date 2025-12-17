@@ -2188,7 +2188,34 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(hidden_states[0], torch.Tensor):
             hidden_states = hidden_states[0]
             hidden_states = hidden_states[logit_indices]
-            output = self.model.compute_logits(hidden_states)
+        logits = self.model.compute_logits(hidden_states)
+        num_reqs = logits.size(0)
+        dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)
+
+        dummy_metadata = SamplingMetadata(
+            temperature=dummy_tensors(0.5),
+            all_greedy=False,
+            all_random=False,
+            top_p=dummy_tensors(0.9),
+            top_k=dummy_tensors(logits.size(1) - 1),
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.1),
+            
+        )
+        try:
+            output = self.sampler(
+                logits=logits, sampling_metadata=dummy_metadata
+            )
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                raise RuntimeError(
+                    ""
+                )
+            else:
+                raise e
         return output
 
     def profile_run(self) -> None:

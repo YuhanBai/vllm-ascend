@@ -2181,7 +2181,6 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        # TODO: need to rum a dummy sampler for generate task
         # Sometimes, after the model is compiled through the AOT backend,
         # the model output may become a list containing only one Tensor object.
         if isinstance(hidden_states, list) and \

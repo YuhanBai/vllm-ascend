@@ -2193,8 +2193,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = logits.size(0)
 
         def dummy_tensors(num_reqs, value):
-            return torch.full(
-                (num_reqs, ), value, device=self.device)
+            return torch.full((num_reqs, ), value, device=self.device)
 
         dummy_metadata = SamplingMetadata(
             temperature=dummy_tensors(0.5),

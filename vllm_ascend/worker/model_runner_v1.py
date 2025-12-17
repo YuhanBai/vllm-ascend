@@ -2188,7 +2188,7 @@ class NPUModelRunner(GPUModelRunner):
             len(hidden_states) == 1 and \
             isinstance(hidden_states[0], torch.Tensor):
             hidden_states = hidden_states[0]
-            hidden_states = hidden_states[logit_indices]
+        hidden_states = hidden_states[logit_indices]
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 

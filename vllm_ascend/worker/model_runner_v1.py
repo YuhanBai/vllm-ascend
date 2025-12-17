@@ -71,9 +71,9 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              LogprobsLists, LogprobsTensors, ModelRunnerOutput,
                              SamplerOutput,
                              make_empty_encoder_model_runner_output)
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
@@ -2189,9 +2189,11 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(hidden_states[0], torch.Tensor):
             hidden_states = hidden_states[0]
             hidden_states = hidden_states[logit_indices]
+        logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
-        dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)
+        dummy_tensors = lambda v: torch.full(
+            (num_reqs, ), v, device=self.device)
 
         dummy_metadata = SamplingMetadata(
             temperature=dummy_tensors(0.5),
@@ -2213,24 +2215,21 @@ class NPUModelRunner(GPUModelRunner):
             logitsprocs=LogitsProcessors(),
         )
         try:
-            output = self.sampler(
-                logits=logits, sampling_metadata=dummy_metadata
-            )
+            output = self.sampler(logits=logits,
+                                  sampling_metadata=dummy_metadata)
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(
                     "NPU out of memory occurred when warming up sampler with "
                     f"{num_reqs} dummy requests. Please try lowering "
                     "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine."
-                ) from e
+                    "initializing the engine.") from e
             else:
                 raise e
         if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-                draft_token_ids, self.device
-            )
+                draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
             draft_probs = None

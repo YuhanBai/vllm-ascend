@@ -21,6 +21,7 @@ import torch_npu
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+import vllm_ascend.envs as envs_ascend
 
 
 def select_experts(hidden_states: torch.Tensor,
@@ -62,21 +63,21 @@ def select_experts(hidden_states: torch.Tensor,
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
-    topk_weights, topk_ids = _select_experts_with_fusion_ops(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        top_k=top_k,
-        use_grouped_topk=use_grouped_topk,
-        topk_group=topk_group,
-        renormalize=renormalize,
-        e_score_correction_bias=e_score_correction_bias,
-        num_expert_group=num_expert_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor,
-        global_num_experts=global_num_experts)
-
-    if topk_weights is None:
+    if not envs_ascend.TI_SWITCH:
+        topk_weights, topk_ids = _select_experts_with_fusion_ops(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            renormalize=renormalize,
+            e_score_correction_bias=e_score_correction_bias,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            global_num_experts=global_num_experts)
+    else:
         topk_weights, topk_ids = _native_select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,

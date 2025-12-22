@@ -39,6 +39,7 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
+import vllm_ascend.envs as envs_ascend
 
 from ..utils import weak_ref_tensors
 
@@ -354,7 +355,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
-
+        if envs_ascend.TI_SWITCH:
+            n_head = self.num_heads
+            shape_order = "TND"
+            scale = self.scale
+            mask = mask.to(torch.uint8)
+            output = torch_npu.npu_fusion_attention(
+                query = query,
+                key = key,
+                value = value,
+                head_num = n_head,
+                input_layout = shape_order,
+                pse = None,
+                padding_mask = None,
+                atten_mask = mask,
+                scale = scale,
+                inner_prcise = 0,
+                sparse_mode = 1,
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+            )[0]
+            assert output is not None
+            return output
         torch_npu._npu_flash_attention(query=query,
                                        key=key,
                                        value=value,

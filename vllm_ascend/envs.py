@@ -167,6 +167,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable transpose weight and cast format to FRACTAL_NZ.
     "VLLM_ASCEND_ENABLE_NZ":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    "TI_SWITCH":
+    lambda: bool(int(os.getenv("TI_SWITCH", '0'))),
 }
 
 # end-env-vars-definition

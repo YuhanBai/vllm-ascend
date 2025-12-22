@@ -21,6 +21,7 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
+import vllm_ascend.envs as envs_ascend
 
 
 def _addrmsnorm_forward_oot(
@@ -67,7 +68,7 @@ def _addrmsnorm_forward_oot(
             )
 
     else:
-        if is_310p():
+        if is_310p() or envs_ascend.TI_SWITCH:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)

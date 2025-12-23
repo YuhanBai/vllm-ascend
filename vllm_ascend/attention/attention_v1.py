@@ -370,7 +370,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 padding_mask = None,
                 atten_mask = mask,
                 scale = scale,
-                inner_prcise = 0,
+                inner_precise = 0,
                 sparse_mode = 1,
                 actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
                 actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,

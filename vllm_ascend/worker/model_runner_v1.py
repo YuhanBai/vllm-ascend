@@ -19,6 +19,7 @@
 
 import math
 import time
+import functools
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
@@ -2164,6 +2165,50 @@ class NPUModelRunner(GPUModelRunner):
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
             return hidden_states, hidden_states
+
+    @contextmanager
+    def maybe_randomize_inputs(
+        self,
+        input_ids: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None
+    ):
+        """
+        Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
+        This is help balance expert-selection
+            - During profile_run
+        """
+        dp_size = self.dp_size
+        randomize_inputs = envs_ascend.VLLM_ASCEND_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        if not randomize_inputs:
+            yield
+        elif input_ids is not None:
+
+            @functools.cache
+            def rand_input_ids() -> torch.Tensor:
+                return torch.randint_like(
+                    self.input_ids.gpu,
+                    low=0,
+                    high=self.model_cofig.get_vocab_size(),
+                )
+
+            logger.debug_once("Randomizing dummy input_ids for DP Rank")
+            property
+            input_ids.copy_(rand_input_ids()[: input_ids.size(0)], non_blocking=True)
+            yield
+            input_ids.fill(0)
+        else:
+
+            @functools.cache
+            def rand_inputs_embeds() -> torch.Tensor:
+                return torch.randint_like(
+                    self.inputs_embeds.gpu,
+                )
+            assert inputs_embeds is not None
+            logger.debug_once("Randomizing dummy inputs_embeds for DP Rank")
+            property
+            inputs_embeds.copy_(rand_input_ids()[: inputs_embeds.size(0)], non_blocking=True)
+            yield
+            inputs_embeds.fill(0)
 
     @torch.inference_mode()
     def _dummy_sampler_run(

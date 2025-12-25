@@ -2232,62 +2232,8 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(hidden_states[0], torch.Tensor):
             hidden_states = hidden_states[0]
         hidden_states = hidden_states[logit_indices]
-        logits = self.model.compute_logits(hidden_states)
-        num_reqs = logits.size(0)
+        output = self.model.compute_logits(hidden_states)
 
-        def dummy_tensors(num_reqs, value):
-            return torch.full((num_reqs, ), value, device=self.device)
-
-        dummy_metadata = SamplingMetadata(
-            temperature=dummy_tensors(num_reqs, 0.5),
-            all_greedy=False,
-            all_random=False,
-            top_p=dummy_tensors(num_reqs, 0.9),
-            top_k=dummy_tensors(num_reqs, logits.size(1) - 1),
-            generators={},
-            max_num_logprobs=None,
-            no_penalties=True,
-            prompt_token_ids=None,
-            frequency_penalties=dummy_tensors(num_reqs, 0.1),
-            presence_penalties=dummy_tensors(num_reqs, 0.1),
-            repetition_penalties=dummy_tensors(num_reqs, 0.1),
-            output_token_ids=[[] for _ in range(num_reqs)],
-            spec_token_ids=[[] for _ in range(num_reqs)],
-            allowed_token_ids_mask=None,
-            bad_words_token_ids={},
-            logitsprocs=LogitsProcessors(),
-        )
-        try:
-            output = self.sampler(logits=logits,
-                                  sampling_metadata=dummy_metadata)
-        except RuntimeError as e:
-            if "out of memory" in str(e):
-                raise RuntimeError(
-                    "NPU out of memory occurred when warming up sampler with "
-                    f"{num_reqs} dummy requests. Please try lowering "
-                    "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine.") from e
-            else:
-                raise e
-        if self.speculative_config:
-            draft_token_ids = [[0] for _ in range(num_reqs)]
-            dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-                draft_token_ids, self.device)
-
-            num_tokens = sum(len(ids) for ids in draft_token_ids)
-            draft_probs = None
-            logits = torch.randn(
-                num_tokens + num_reqs,
-                logits.shape[-1],
-                device=self.device,
-                dtype=logits.dtype,
-            )
-            self.rejection_sampler(
-                dummy_spec_decode_metadata,
-                draft_probs,
-                logits,
-                dummy_metadata,
-            )
         return output
 
     def profile_run(self) -> None:

@@ -2185,7 +2185,7 @@ class NPUModelRunner(GPUModelRunner):
                 return torch.randint_like(
                     self.input_ids.gpu,
                     low=0,
-                    high=self.model_cofig.get_vocab_size(),
+                    high=self.model_config.get_vocab_size(),
                 )
 
             logger.debug_once("Randomizing dummy input_ids for DP Rank")
@@ -2193,7 +2193,7 @@ class NPUModelRunner(GPUModelRunner):
             input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
                             non_blocking=True)
             yield
-            input_ids.fill(0)
+            input_ids.fill_(0)
         else:
 
             @functools.cache
@@ -2206,7 +2206,7 @@ class NPUModelRunner(GPUModelRunner):
             inputs_embeds.copy_(rand_inputs_embeds()[:inputs_embeds.size(0)],
                                 non_blocking=True)
             yield
-            inputs_embeds.fill(0)
+            inputs_embeds.fill_(0)
 
     @torch.inference_mode()
     def _dummy_sampler_run(

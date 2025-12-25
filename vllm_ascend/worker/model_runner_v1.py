@@ -2200,6 +2200,7 @@ class NPUModelRunner(GPUModelRunner):
             @functools.cache
             def rand_inputs_embeds() -> torch.Tensor:
                 return torch.randint_like(self.inputs_embeds.gpu, )
+
             assert inputs_embeds is not None
             logger.debug_once("Randomizing dummy inputs_embeds for DP Rank")
             property

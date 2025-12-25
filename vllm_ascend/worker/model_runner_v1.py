@@ -17,9 +17,9 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import functools
 import math
 import time
-import functools
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
@@ -2131,19 +2131,20 @@ class NPUModelRunner(GPUModelRunner):
                     return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
 
-            with set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    with_prefill=with_prefill,
-                    in_profile_run=is_profile,
-                    num_actual_tokens=0,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
-                    prefetch_stream=self.prefetch_stream,
-                    model_instance=self.model,
-                    weight_prefetch_method=self.weight_prefetch_method):
+            with (self.maybe_randomize_inputs(input_ids, inputs_embeds),
+                    set_ascend_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        with_prefill=with_prefill,
+                        in_profile_run=is_profile,
+                        num_actual_tokens=0,
+                        aclgraph_runtime_mode=aclgraph_runtime_mode,
+                        batch_descriptor=batch_descriptor,
+                        prefetch_stream=self.prefetch_stream,
+                        model_instance=self.model,
+                        weight_prefetch_method=self.weight_prefetch_method)):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)
@@ -2167,11 +2168,8 @@ class NPUModelRunner(GPUModelRunner):
             return hidden_states, hidden_states
 
     @contextmanager
-    def maybe_randomize_inputs(
-        self,
-        input_ids: torch.Tensor | None,
-        inputs_embeds: torch.Tensor | None
-    ):
+    def maybe_randomize_inputs(self, input_ids: torch.Tensor | None,
+                               inputs_embeds: torch.Tensor | None):
         """
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
         This is help balance expert-selection
@@ -2193,20 +2191,20 @@ class NPUModelRunner(GPUModelRunner):
 
             logger.debug_once("Randomizing dummy input_ids for DP Rank")
             property
-            input_ids.copy_(rand_input_ids()[: input_ids.size(0)], non_blocking=True)
+            input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
+                            non_blocking=True)
             yield
             input_ids.fill(0)
         else:
 
             @functools.cache
             def rand_inputs_embeds() -> torch.Tensor:
-                return torch.randint_like(
-                    self.inputs_embeds.gpu,
-                )
+                return torch.randint_like(self.inputs_embeds.gpu,)
             assert inputs_embeds is not None
             logger.debug_once("Randomizing dummy inputs_embeds for DP Rank")
             property
-            inputs_embeds.copy_(rand_input_ids()[: inputs_embeds.size(0)], non_blocking=True)
+            inputs_embeds.copy_(rand_inputs_embeds()[:inputs_embeds.size(0)],
+                                non_blocking=True)
             yield
             inputs_embeds.fill(0)
 

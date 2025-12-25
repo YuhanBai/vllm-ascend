@@ -2132,19 +2132,19 @@ class NPUModelRunner(GPUModelRunner):
                         hidden_states[dummy_indices])
 
             with (self.maybe_randomize_inputs(input_ids, inputs_embeds),
-                    set_ascend_forward_context(
-                        attn_metadata,
-                        self.vllm_config,
-                        num_tokens=num_tokens_padded,
-                        num_tokens_across_dp=num_tokens_across_dp,
-                        with_prefill=with_prefill,
-                        in_profile_run=is_profile,
-                        num_actual_tokens=0,
-                        aclgraph_runtime_mode=aclgraph_runtime_mode,
-                        batch_descriptor=batch_descriptor,
-                        prefetch_stream=self.prefetch_stream,
-                        model_instance=self.model,
-                        weight_prefetch_method=self.weight_prefetch_method)):
+                  set_ascend_forward_context(
+                      attn_metadata,
+                      self.vllm_config,
+                      num_tokens=num_tokens_padded,
+                      num_tokens_across_dp=num_tokens_across_dp,
+                      with_prefill=with_prefill,
+                      in_profile_run=is_profile,
+                      num_actual_tokens=0,
+                      aclgraph_runtime_mode=aclgraph_runtime_mode,
+                      batch_descriptor=batch_descriptor,
+                      prefetch_stream=self.prefetch_stream,
+                      model_instance=self.model,
+                      weight_prefetch_method=self.weight_prefetch_method)):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)

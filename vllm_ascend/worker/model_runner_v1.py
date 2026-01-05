@@ -1950,7 +1950,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         moe_comm_type = self._select_moe_comm_method(num_input_tokens,
                                                      self.with_prefill)
-
+        if envs_ascend.TI_SWITCH:
+            moe_comm_type = MoECommType.ALLTOALL
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
@@ -2399,7 +2400,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
 
         moe_comm_type = self._select_moe_comm_method(num_tokens, with_prefill)
-
+        if envs_ascend.TI_SWITCH:
+            moe_comm_type = MoECommType.ALLTOALL
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.

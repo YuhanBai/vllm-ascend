@@ -30,10 +30,15 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
+from vllm.v1.worker.gpu import model_runner as gpu_model_runner
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.aclgraph_utils import AclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, build_attn_state
+from vllm_ascend.worker.v2.dp_utils import (
+    get_cudagraph_and_dp_padding_for_ascend,
+    set_ascend_dp_config,
+)
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.sample.sampler import AscendSampler
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -62,7 +67,7 @@ class NPUModelRunner(GPUModelRunner):
         # NPU specific initializations can be added below.
         self.cudagraph_manager: AclGraphManager = AclGraphManager(
             self.vllm_config,
-            self.uses_mrope,
+            self.use_aux_hidden_state_outputs,
             self.device,
         )
 
@@ -112,6 +117,19 @@ class NPUModelRunner(GPUModelRunner):
             device="cpu",
             pin_memory=True,
         )
+
+        # Ascend-specific DP optimization: set the DP config for this thread.
+        # This enables the get_cudagraph_and_dp_padding function to use
+        # Ascend-specific optimizations (e.g., skipping all-reduce for dense models).
+        is_kv_consumer = False
+        if self.vllm_config.kv_transfer_config is not None:
+            is_kv_consumer = self.vllm_config.kv_transfer_config.is_kv_consumer
+        set_ascend_dp_config(self.vllm_config, is_kv_consumer)
+
+        # Replace the dp_utils function in the parent module with our optimized version.
+        # This allows the parent's execute_model to use Ascend-specific DP logic
+        # without needing to override the entire method.
+        gpu_model_runner.get_cudagraph_and_dp_padding = get_cudagraph_and_dp_padding_for_ascend
 
     def prepare_inputs(
         self,

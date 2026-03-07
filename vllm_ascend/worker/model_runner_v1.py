@@ -2136,8 +2136,7 @@ class NPUModelRunner(GPUModelRunner):
          - during DP rank dummy run
         """
 
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and self.dp_size > 1
         if not randomize_inputs:
             yield
         elif input_ids is not None:

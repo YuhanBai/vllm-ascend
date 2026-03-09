@@ -26,6 +26,7 @@ import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.v1.worker.gpu.dp_utils import get_cudagraph_and_dp_padding as _get_cudagraph_and_dp_padding
+from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp as _make_num_tokens_across_dp
 
 from vllm_ascend.ascend_forward_context import MoECommType, select_moe_comm_method
 from vllm_ascend.utils import is_moe_model
@@ -122,11 +123,10 @@ def skip_all_reduce_across_dp_group(vllm_config: VllmConfig, is_kv_consumer: boo
 def get_cudagraph_and_dp_padding(
     num_tokens: int,
     cudagraph_size: int | None,
-    cudagraph_runtime_mode: int,
     dp_size: int,
     dp_rank: int,
     skip_all_reduce: bool = False,
-) -> tuple[int, torch.Tensor | None, int]:
+) -> tuple[bool, int, torch.Tensor | None]:
     """
     Ascend-specific version of get_cudagraph_and_dp_padding.
 
@@ -136,34 +136,33 @@ def get_cudagraph_and_dp_padding(
     Args:
         num_tokens: Number of tokens in the current batch.
         cudagraph_size: The cudagraph size for this batch, or None if not applicable.
-        cudagraph_runtime_mode: The cudagraph runtime mode (0=NONE, 1=PIECEWISE, 2=FULL).
         dp_size: Data parallel size.
         dp_rank: Data parallel rank.
         skip_all_reduce: Whether to skip the all-reduce operation.
 
     Returns:
-        tuple[int, torch.Tensor | None, int]:
+        tuple[bool, int, torch.Tensor | None]:
+            - use_cudagraph: Whether to use CUDA graph.
             - num_tokens_after_padding: Number of tokens after padding.
             - num_tokens_across_dp: Tensor of token counts across DP ranks, or None.
-            - synced_cudagraph_mode: Synchronized cudagraph mode across DP ranks.
     """
     if dp_size == 1:
         if cudagraph_size is not None:
-            return cudagraph_size, None, cudagraph_runtime_mode
+            return True, cudagraph_size, None
         else:
-            return num_tokens, None, cudagraph_runtime_mode
+            return False, num_tokens, None
 
     if skip_all_reduce:
+        use_cudagraph = cudagraph_size is not None
         num_tokens_after_padding = cudagraph_size if cudagraph_size is not None else num_tokens
         num_tokens_across_dp = torch.full(
             (dp_size,), num_tokens_after_padding, dtype=torch.int32, device="cpu"
         )
-        return num_tokens_after_padding, num_tokens_across_dp, cudagraph_runtime_mode
+        return use_cudagraph, num_tokens_after_padding, num_tokens_across_dp
 
     return _get_cudagraph_and_dp_padding(
         num_tokens,
         cudagraph_size,
-        cudagraph_runtime_mode,
         dp_size,
         dp_rank,
     )
@@ -172,10 +171,9 @@ def get_cudagraph_and_dp_padding(
 def get_cudagraph_and_dp_padding_for_ascend(
     num_tokens: int,
     cudagraph_size: int | None,
-    cudagraph_runtime_mode: int,
     dp_size: int,
     dp_rank: int,
-) -> tuple[int, torch.Tensor | None, int]:
+) -> tuple[bool, int, torch.Tensor | None]:
     """
     Ascend-optimized version that automatically determines skip_all_reduce.
 
@@ -195,7 +193,6 @@ def get_cudagraph_and_dp_padding_for_ascend(
     return get_cudagraph_and_dp_padding(
         num_tokens,
         cudagraph_size,
-        cudagraph_runtime_mode,
         dp_size,
         dp_rank,
         skip_all_reduce=skip_all_reduce,
@@ -204,32 +201,27 @@ def get_cudagraph_and_dp_padding_for_ascend(
 
 def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
     """Create a tensor of token counts across DP ranks."""
-    if dp_size == 1:
-        return None
-    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+    return _make_num_tokens_across_dp(dp_size, num_tokens)
 
 
 def get_batch_metadata_across_dp(
     num_tokens: int,
     cudagraph_size: int,
-    cudagraph_runtime_mode: int,
     dp_size: int,
     dp_rank: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Get batch metadata across DP ranks via all_reduce.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tuple[torch.Tensor, torch.Tensor]:
             - num_tokens_across_dp: Token counts across DP ranks.
             - cudagraph_size_across_dp: Cudagraph sizes across DP ranks.
-            - cudagraph_mode_across_dp: Cudagraph modes across DP ranks.
     """
     assert dp_size > 1
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(3, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(2, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = cudagraph_size
-    tensor[2][dp_rank] = cudagraph_runtime_mode
     dist.all_reduce(tensor, group=group)
-    return tensor[0], tensor[1], tensor[2]
+    return tensor[0], tensor[1]

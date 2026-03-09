@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/aclgraph_utils.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/cudagraph_utils.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -44,20 +44,22 @@ class AclGraphManager(CudaGraphManager):
         with torch_cuda_wrapper():
             super().__init__(vllm_config, use_aux_hidden_state_outputs, device)
 
-    def capture_graph(
+    def capture(
         self,
-        num_tokens: int,
         model: nn.Module,
         input_buffers: InputBuffers,
+        mrope_positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
     ) -> None:
         with torch_cuda_wrapper(), prepare_capture_inputs_wrapper():
-            super().capture_graph(
-                num_tokens,
+            super().capture(
                 model,
                 input_buffers,
+                mrope_positions,
+                inputs_embeds,
                 block_tables,
                 attn_metadata_builders,
                 kv_cache_config,
@@ -67,8 +69,6 @@ class AclGraphManager(CudaGraphManager):
 @contextmanager
 def prepare_capture_inputs_wrapper():
     """Context manager to override input preparation for NPU graph capture."""
-    # TODO(Ronald1995): make prepare_inputs_to_capture as static method
-    # in CudaGraphManager.
     global prepare_inputs_to_capture_gpu
     try:
         ori_func = prepare_inputs_to_capture_gpu

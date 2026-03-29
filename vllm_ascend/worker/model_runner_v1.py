@@ -145,6 +145,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedE
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.worker.gpu.mm.encoder_cudagraph import EncoderCudaGraphManager
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -279,6 +280,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
+        
+        # Encoder CUDA graph manager (initialized after model load if enabled) 
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None  
         # Set up Attention
         self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
             vllm_config.model_config.hf_text_config, "index_topk"
@@ -3331,8 +3335,40 @@ class NPUModelRunner(GPUModelRunner):
         if gpu_model_runner_cls is None:
             raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
         parent_module_name = gpu_model_runner_cls.__module__
+        
+        # Initialize encoder CUDA graph manager if enabled.
+        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
+        # because @runtime_checkable Protocol isinstance() checks do not
+        # work through __getattr__ forwarding.
+        if (
+            self.compilation_config.cudagraph_mm_encoder
+            and self.supports_mm_inputs
+            and self.encoder_cudagraph_manager is None
+        ):
+            from vllm.model_executor.models.interfaces import (
+                SupportsEncoderCudaGraph,
+                supports_encoder_cudagraph,
+            )
+            from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
+                EncoderCudaGraphManager,
+            )
+
+            raw_model = self.get_model()
+            if supports_encoder_cudagraph(raw_model):
+                self.encoder_cudagraph_manager = EncoderCudaGraphManager(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    dtype=self.dtype,
+                    model=raw_model,
+                )
+                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+        
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             GPUModelRunner.capture_model(self)
+        
+        # Capture encoder CUDA graphs if enabled
+        if self.encoder_cudagraph_manager is not None:
+            self.encoder_cudagraph_manager.capture()
 
     def _prepare_multimodal_fields(self):
         """

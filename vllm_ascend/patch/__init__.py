@@ -1344,33 +1344,41 @@
 #       Triton-Ascend release is available. Remove the marker-cache kernel
 #       patch when Triton-Ascend 3.6.0 is the minimum supported version.
 #
-#   4. `vllm.v1.worker.gpu.sample.output._pack_sampling_mask_kernel` and
-#      `SamplingMaskTensors.from_logits`
+#   4. `vllm.v1.worker.gpu.sample.output._pack_sampling_mask_kernel` /
+#      `output._compact_sampling_mask_kernel` and `SamplingMaskTensors.from_logits`
 #    Why:
-#       (1) The upstream kernel sums an int1 tensor (`tl.sum(keep)`) before
-#       casting to int32, which native CUDA Triton upcasts automatically.
-#       triton-ascend does not upcast, so `counts` is truncated to 0/1 and the
-#       sampling-mask replay (mask_reply) returns wrong candidate sets on NPU.
-#       (2) The upstream `from_logits` launcher hard-codes `BLOCK_SIZE=8192`,
+#       (1) Both upstream `from_logits` launchers hard-code `BLOCK_SIZE=8192`,
 #       which the Ascend backend cannot launch. The tightest constraint is the
 #       non-contiguous (strided/gather) load path, whose max block is far
 #       smaller than a contiguous load's, so the block must be reduced to 1024.
+#       (2) Release lane (v0.29.0) only: the upstream `_pack_sampling_mask_kernel`
+#       sums an int1 tensor (`tl.sum(keep)`) before casting to int32, which
+#       native CUDA Triton upcasts automatically. triton-ascend does not upcast,
+#       so `counts` is truncated to 0/1 and the sampling-mask replay (mask_replay)
+#       returns wrong candidate sets on NPU. The main lane already casts `keep`
+#       before the reduction.
 #    How:
-#       Rebind `output._pack_sampling_mask_kernel` to the Ascend copy in
-#       `vllm_ascend/ops/triton/v2/sample/pack_sampling_mask.py`, which casts
-#       `keep` to int32 before the reduction (`tl.sum(keep.to(tl.int32))`).
-#       Also rebind `output.SamplingMaskTensors.from_logits` to the module's
-#       `sampling_mask_from_logits`, which launches with the reduced
-#       `SAMPLING_MASK_BLOCK_SIZE` (1024) instead of 8192.
+#       Provide Ascend copies of both kernels in
+#       `vllm_ascend/ops/triton/v2/sample/pack_sampling_mask.py` and rebind
+#       `SamplingMaskTensors.from_logits` to the matching launcher, both
+#       launching with the reduced `SAMPLING_MASK_BLOCK_SIZE` (1024) instead of
+#       8192. Upstream renamed and reshaped the kernel between the v0.29.0
+#       release (`_pack_sampling_mask_kernel`) and the verified main commit
+#       84030bbe3 (`_compact_sampling_mask_kernel`, which additionally emits the
+#       first `max_num_kept` finite token ids per request). The patch dispatches
+#       on whichever symbol the installed vLLM exposes; binding the wrong one
+#       would silently no-op, because assigning a non-existent module attribute
+#       only adds an unused name while replacing `from_logits` with a mismatched
+#       signature raises at request time.
 #    Test:
 #       Precision test added at
 #       tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pack_sampling_mask.py
 #    Related PR (if no, explain why):
 #       No. This is a Triton-Ascend backend compatibility patch.
 #    Future Plan:
-#       Remove once triton-ascend upcasts int1 reductions and supports the
-#       upstream BLOCK_SIZE, or vLLM adds a backend-dispatch mechanism for
-#       this kernel.
+#       Remove once triton-ascend supports the upstream BLOCK_SIZE and (release
+#       lane) upcasts int1 reductions, or vLLM adds a backend-dispatch mechanism
+#       for this kernel.
 #
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

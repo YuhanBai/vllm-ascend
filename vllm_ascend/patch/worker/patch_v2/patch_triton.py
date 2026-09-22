@@ -33,6 +33,7 @@ from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p_npu
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
@@ -73,19 +74,18 @@ mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 # For now, use the Ascend-specific implementation of the sampling-mask replay
 # (mask_reply) packing kernel and its launcher.
 #
-# Dispatch on the symbol the installed vLLM actually exposes, because upstream
-# renamed the kernel between the v0.29.0 release (``_pack_sampling_mask_kernel``)
-# and the verified main commit 84030bbe3 (``_compact_sampling_mask_kernel``,
-# which also emits compact token ids and takes ``max_num_kept``). Binding the
-# wrong one silently no-ops: assigning a non-existent attribute only adds an
-# unused name, and replacing ``from_logits`` with a mismatched signature raises
-# at request time.
-if hasattr(output, "_compact_sampling_mask_kernel"):
-    output._compact_sampling_mask_kernel = _compact_sampling_mask_kernel
-    output.SamplingMaskTensors.from_logits = classmethod(compact_sampling_mask_from_logits)
-else:
+# Upstream renamed and reshaped the kernel between the v0.29.0 release
+# (``_pack_sampling_mask_kernel``) and the verified main commit
+# 84030bbe3 (``_compact_sampling_mask_kernel``, which also emits compact token
+# ids and takes ``max_num_kept``). Binding the wrong one would silently no-op:
+# assigning a non-existent module attribute only adds an unused name, while
+# replacing ``from_logits`` with a mismatched signature raises at request time.
+if vllm_version_is("0.29.0"):
     output._pack_sampling_mask_kernel = _pack_sampling_mask_kernel
     output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits)
+else:
+    output._compact_sampling_mask_kernel = _compact_sampling_mask_kernel
+    output.SamplingMaskTensors.from_logits = classmethod(compact_sampling_mask_from_logits)
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.
 # For now, use the Ascend-specific implementation.

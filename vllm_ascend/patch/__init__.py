@@ -1365,11 +1365,11 @@
 #       8192. Upstream renamed and reshaped the kernel between the v0.29.0
 #       release (`_pack_sampling_mask_kernel`) and the verified main commit
 #       84030bbe3 (`_compact_sampling_mask_kernel`, which additionally emits the
-#       first `max_num_kept` finite token ids per request). The patch dispatches
-#       on whichever symbol the installed vLLM exposes; binding the wrong one
-#       would silently no-op, because assigning a non-existent module attribute
-#       only adds an unused name while replacing `from_logits` with a mismatched
-#       signature raises at request time.
+#       first `max_num_kept` finite token ids per request). The patch selects the
+#       matching implementation with `vllm_version_is("0.29.0")`; binding the
+#       wrong one would silently no-op, because assigning a non-existent module
+#       attribute only adds an unused name while replacing `from_logits` with a
+#       mismatched signature raises at request time.
 #    Test:
 #       Precision test added at
 #       tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pack_sampling_mask.py

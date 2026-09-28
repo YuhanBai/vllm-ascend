@@ -1413,7 +1413,56 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
-#   3. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
+#   3. `vllm.v1.worker.gpu.sample.output._compact_sampling_mask_kernel` and
+#      `SamplingMaskTensors.from_logits`
+#    Why:
+#       (1) The upstream launcher hard-codes `BLOCK_SIZE=8192` for the kernel
+#       that captures the per-request sampling mask (vLLM's sampling
+#       distribution replay, a.k.a. mask replay). The Ascend backend cannot
+#       lower that block size: TTIR-to-Linalg materialization fails in
+#       `hivm-plan-memory`, so mask replay cannot even be enabled on NPU.
+#       Shrinking the block is the only lever, and the non-contiguous
+#       (strided/gather) load path is the tightest constraint because its max
+#       block is far smaller than a contiguous load's; 4096/2048 still fail
+#       there, 1024 lowers both.
+#       (2) The upstream kernel also builds a compact token-id buffer using
+#       `tl.cumsum` followed by a masked scatter store to a cumsum-derived
+#       index. On this stack that pair makes the kernel impossible to capture
+#       in an ACLGraph: triton-ascend takes a launch path that issues a device
+#       `rtMemcpy`, and the runtime rejects it with "operation not permitted
+#       when a stream is capturing and the specified capture mode is not
+#       relaxed". The engine then dies with an AIVEC vector-core timeout on the
+#       first graphed decode step, so mask replay is unusable with graph mode
+#       even though it works eagerly. Neither construct is a problem on its
+#       own; removing the scan is the portable fix.
+#       The 4-field `SamplingMaskTensors` returned by `from_logits` must be
+#       preserved: `sampler.py` and `async_utils.py` unpack it by name.
+#    How:
+#       Rebind `output._compact_sampling_mask_kernel` to the Ascend copy in
+#       `vllm_ascend/ops/triton/v2/sample/pack_sampling_mask.py`, which emits
+#       the bit-packed finite-logit support plus the exact per-request count,
+#       and rebind `output.SamplingMaskTensors.from_logits` to the module's
+#       `compact_sampling_mask_from_logits`, which launches it with
+#       `SAMPLING_MASK_BLOCK_SIZE` (1024) instead of 8192.
+#       The compact token-id buffer is returned with zero width so that
+#       `tolists()` always reconstructs the support from the exact bitmask;
+#       that path is semantically identical, it just materializes the support
+#       on the host instead of slicing a small int32 buffer.
+#       The kernel deliberately keeps the upstream `keep.to(tl.int32)`
+#       widening: triton-ascend keeps an int1 reduction in int1 (native CUDA
+#       Triton upcasts), which would truncate `counts` to 0/1 and silently
+#       return wrong candidate sets.
+#    Test:
+#       Precision test added at
+#       tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_pack_sampling_mask.py
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend backend compatibility patch.
+#    Future Plan:
+#       Remove once the Ascend backend supports the upstream BLOCK_SIZE and can
+#       capture the scanning compaction path, or vLLM adds a backend-dispatch
+#       mechanism for this kernel.
+#
+#   4. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
 #      `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`
 #    Why:
 #       The upstream thinking-budget kernels expose two independent

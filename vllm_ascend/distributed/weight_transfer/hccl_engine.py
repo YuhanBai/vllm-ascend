@@ -593,12 +593,17 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 return
 
             # PyHcclCommunicator::broadcast asserts the tensor lives on the
-            # communicator's device and reads it asynchronously, so keep a
-            # device-local copy alive until the broadcast has completed.
+            # communicator's device and only enqueues hcclBroadcast on the stream
+            # it is given, so the device-local copy above and the broadcast are
+            # ordered on the same stream: a per-parameter synchronize would
+            # serialize the transfer and buy no correctness. Dropping `send`
+            # early is safe for the same reason -- the next iteration allocates
+            # and copies on this stream, behind the pending broadcast -- and
+            # `_post_send_sync()` drains the stream once per update round.
+            stream = torch.npu.current_stream()
             for _, source_tensor in self._checked_iter(source, meta):
                 send = source_tensor.detach().to(self.device).contiguous()
-                self.model_update_group.broadcast(send, src=0, stream=torch.npu.current_stream())
-                torch.npu.current_stream().synchronize()
+                self.model_update_group.broadcast(send, src=0, stream=stream)
                 del send
 
     def _post_send_sync(self) -> None:

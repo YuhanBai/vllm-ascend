@@ -16,6 +16,7 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 
 from vllm_ascend.distributed.weight_transfer.hccl_engine import (
     HCCLTrainerInitInfo,
+    HCCLTrainerSendWeightsArgs,
     HCCLTrainerWeightTransferEngine,
     HCCLWeightTransferEngine,
     HCCLWeightTransferInitInfo,
@@ -394,3 +395,53 @@ def test_worker_honors_legacy_per_update_wire_params():
     )
 
     assert engine._wire_params(update_info) == (True, 64, 3)
+
+
+def _patch_npu_device_context():
+    """Replace ``torch.npu`` with just the device context manager."""
+    bound = MagicMock(return_value=nullcontext())
+    return bound, patch.object(torch, "npu", SimpleNamespace(device=bound), create=True)
+
+
+def test_worker_packed_receive_binds_the_worker_device():
+    """The packed consumer keeps the legacy helper signature.
+
+    The Ascend packed helpers resolve their streams and packed buffers from the
+    ambient NPU device, so the worker binds ``self.device`` around the call
+    instead of passing a device argument.
+    """
+    engine = _make_worker_with_wire_params(explicit=True)
+    engine.device = torch.device("npu:1")
+    engine.model = MagicMock()
+    engine.model_update_group = MagicMock()
+    update_info = HCCLWeightTransferUpdateInfo(names=["w"], dtype_names=["float32"], shapes=[[1]])
+    bound, npu_patch = _patch_npu_device_context()
+
+    with (
+        patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_consumer") as consume,
+        npu_patch,
+    ):
+        HCCLWeightTransferEngine.receive_weights(engine, update_info)
+
+    bound.assert_called_once_with(engine.device)
+    assert consume.call_args.kwargs["group"] is engine.model_update_group
+    assert "device" not in consume.call_args.kwargs
+
+
+def test_legacy_packed_trainer_binds_the_communicator_device():
+    """The legacy trainer path binds the communicator's device around packing."""
+    group = SimpleNamespace(device=torch.device("npu:3"))
+    bound, npu_patch = _patch_npu_device_context()
+
+    with (
+        patch("vllm_ascend.distributed.weight_transfer.hccl_engine.packed_broadcast_producer") as produce,
+        npu_patch,
+    ):
+        HCCLWeightTransferEngine.trainer_send_weights(
+            iterator=iter([("weight", torch.zeros(2))]),
+            trainer_args=HCCLTrainerSendWeightsArgs(group=group, packed=True),
+        )
+
+    bound.assert_called_once_with(group.device)
+    assert produce.call_args.kwargs["group"] is group
+    assert "device" not in produce.call_args.kwargs

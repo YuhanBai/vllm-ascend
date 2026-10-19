@@ -45,6 +45,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightSource,
     WeightTransferInitInfo,
 )
+from vllm.distributed.weight_transfer.nccl_common import worker_init_payload
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -511,7 +512,9 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             try:
                 init_future = executor.submit(
                     client.init_weight_transfer_engine,
-                    hccl_common.worker_init_payload(worker_init_info),
+                    # Upstream's serializer: it drops unset wire params, which is
+                    # exactly what the three-valued HCCL init info needs.
+                    worker_init_payload(worker_init_info),
                 )
                 group = hccl_common.trainer_init(init_info, rank=init_info.rank)
                 init_future.result()

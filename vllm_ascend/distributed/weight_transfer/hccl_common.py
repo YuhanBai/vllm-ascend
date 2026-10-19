@@ -5,11 +5,14 @@
 Mirrors `vllm.distributed.weight_transfer.nccl_common`: the HCCL backend speaks
 upstream's broadcast protocol over a `StatelessProcessGroup`, so only the
 communicator constructor, the TCP-only rendezvous and the NPU device lookup
-differ from the upstream helpers.
+differ from the upstream helpers. The worker init payload is taken from upstream
+directly (`nccl_common.worker_init_payload` serializes both init infos the same
+way), and the rank arithmetic is kept identical to
+`nccl_common.worker_init_process_group` so worker ranks line up with the
+upstream protocol.
 """
 
-from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -48,16 +51,6 @@ def stateless_init_process_group(
             "refusing to continue as if the broadcast succeeded"
         )
     return pyhccl
-
-
-def worker_init_payload(init_info: "HCCLWeightTransferInitInfo") -> dict[str, Any]:
-    """Serialize a worker init info for `init_weight_transfer_engine`.
-
-    Unset (``None``) wire params are dropped, so the payload carries only what
-    the trainer actually fixed and the worker keeps its per-update fallback for
-    the ones left out.
-    """
-    return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
 def worker_init_process_group(

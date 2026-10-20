@@ -350,8 +350,6 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             raise
 
     def _broadcast(self, source: WeightSource, meta: list[ParamMeta]) -> None:
-        if len({param.name for param in meta}) != len(meta):
-            raise ValueError("WeightSource.metadata() contains duplicate parameter names")
         with torch.npu.device(self.device):
             if not self.is_sender:
                 # Non-sender ranks only replay the source to stay in the

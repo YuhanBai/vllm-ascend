@@ -56,9 +56,14 @@ def _validate_packed_params(info: Any) -> None:
             raise ValueError(f"`{name}` must be a positive integer or None, got {value!r}")
 
 
-@dataclass
+@dataclass(kw_only=True)
 class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Worker-side init info: TCP rendezvous plus optional packed wire params."""
+    """Worker-side init info: TCP rendezvous plus optional packed wire params.
+
+    Keyword-only for the same reason upstream's `NCCLWeightTransferInitInfo` is:
+    the fields after ``world_size`` are optional, so a positional call would
+    silently shift when another one is added.
+    """
 
     master_address: str
     """IP address of the trainer (rank 0) for HCCL process group setup."""
@@ -310,13 +315,13 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         # Upstream's `NCCLTrainerInitInfo` has no `rank_offset`: the single
         # trainer sender is rank 0, so the workers start at rank 1.
         worker_init_info = HCCLWeightTransferInitInfo(
-            init_info.master_address,
-            init_info.master_port,
-            1,
-            init_info.world_size,
-            init_info.packed,
-            init_info.packed_buffer_size_bytes,
-            init_info.packed_num_buffers,
+            master_address=init_info.master_address,
+            master_port=init_info.master_port,
+            rank_offset=1,
+            world_size=init_info.world_size,
+            packed=init_info.packed,
+            packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
+            packed_num_buffers=init_info.packed_num_buffers,
         )
         # The worker-side init blocks inside the HCCL rendezvous, so drive the
         # RPC on a side thread while this rank opens rank 0.

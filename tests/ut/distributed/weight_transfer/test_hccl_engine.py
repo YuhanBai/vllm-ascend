@@ -248,7 +248,7 @@ def test_send_reuses_real_upstream_round_trip(sender):
 @pytest.mark.parametrize("packed", [False, True])
 def test_worker_loads_on_assigned_device_in_both_modes(packed):
     engine = _make_engine()
-    engine._init_info = HCCLWeightTransferInitInfo("host", 1234, 1, 2)
+    engine._init_info = HCCLWeightTransferInitInfo(master_address="host", master_port=1234, rank_offset=1, world_size=2)
     engine.model_update_group = MagicMock()
     info = HCCLWeightTransferUpdateInfo(names=["w"], dtype_names=["float32"], shapes=[[1]], packed=packed)
 

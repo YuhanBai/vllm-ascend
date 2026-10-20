@@ -132,7 +132,7 @@ class PyHcclCommunicator:
         if not self.available:
             return
         self.available = False
-        assert self.comm is not None
+        assert self.comm is not None, "HCCL communicator is marked available but has no native handle"
         with torch.npu.device(self.device):
             # Collectives may have been submitted on an explicit stream.
             torch.npu.synchronize(self.device)
@@ -148,7 +148,7 @@ class PyHcclCommunicator:
             return None
         if not self.available:
             raise RuntimeError("HCCL communicator is closed")
-        assert self.comm is not None
+        assert self.comm is not None, "HCCL communicator is marked available but has no native handle"
         # hccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
@@ -181,7 +181,7 @@ class PyHcclCommunicator:
             return
         if not self.available:
             raise RuntimeError("HCCL communicator is closed")
-        assert self.comm is not None
+        assert self.comm is not None, "HCCL communicator is marked available but has no native handle"
         assert tensor.device == self.device, (
             f"this hccl communicator is created to work on {self.device}, but the input tensor is on {tensor.device}"
         )

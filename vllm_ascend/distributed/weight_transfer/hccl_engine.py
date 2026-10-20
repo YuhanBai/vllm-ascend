@@ -250,8 +250,14 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
                     num_buffers=args.packed_num_buffers,
                 )
             else:
+                stream = args.stream or torch.npu.current_stream()
                 for item in iterator:
-                    args.group.broadcast(post(item), src=args.src, stream=args.stream or torch.npu.current_stream())
+                    tensor = post(item)
+                    args.group.broadcast(tensor, src=args.src, stream=stream)
+                    # PyHcclCommunicator.broadcast only enqueues the collective.
+                    # Wait for it here so the staging tensor stays alive (and its
+                    # storage cannot be reused) until the broadcast has landed.
+                    stream.synchronize()
 
 
 class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):

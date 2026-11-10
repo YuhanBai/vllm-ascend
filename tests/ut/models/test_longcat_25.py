@@ -4,9 +4,12 @@
 from types import SimpleNamespace
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.models.longcat_25_config import LongCat25Config
 from vllm_ascend.models.longcat_25_ops import over_embedding_ids, route_experts, select_longcat_topk
+from vllm_ascend.models.longcat_25_state import LongCat25ModelState
+from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
 def test_config_normalizes_checkpoint_fields():
@@ -75,3 +78,57 @@ def test_bf16_indexer_passes_mandatory_token_counts():
         )
         is selected
     )
+
+
+def test_decode_graph_reuses_over_embedding_storage(monkeypatch):
+    def init_parent(self, config, model, encoder_cache, device):
+        self.model_config = SimpleNamespace(enforce_eager=False)
+        self.inputs_embeds_size = 2
+        self.dtype = torch.float32
+        self.device = device
+
+    monkeypatch.setattr(AscendModelState, "__init__", init_parent)
+    monkeypatch.setattr(AscendModelState, "prepare_dummy_inputs", lambda *args: {})
+    monkeypatch.setattr(AscendModelState, "prepare_inputs", lambda *args: {})
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, max_cudagraph_capture_size=4)
+    )
+    embedding = SimpleNamespace(
+        n=2,
+        eos_id=2,
+        ne_weights=torch.tensor([[[1, 10]]], dtype=torch.int32),
+        ne_mods=torch.tensor([[13]], dtype=torch.int32),
+        exclusive_sizes=torch.tensor([0, 13], dtype=torch.int32),
+        embed_batched=lambda tokens, ids: torch.stack((tokens, ids[:, 0]), dim=1).float(),
+    )
+    model = SimpleNamespace(model=SimpleNamespace(ngram_embeddings=embedding))
+    state = LongCat25ModelState(config, model, None, torch.device("cpu"))
+    captured = state.prepare_dummy_inputs(4, 4)["inputs_embeds"]
+    captured.fill_(99)
+    batch = SimpleNamespace(
+        is_dummy=False,
+        num_tokens=2,
+        num_tokens_after_padding=4,
+        num_reqs=2,
+        input_ids=torch.tensor([5, 4, 0, 0]),
+        query_start_loc=torch.tensor([0, 1, 2, 3, 4]),
+        idx_mapping=torch.tensor([1, 0, 0, 0]),
+        positions=torch.tensor([1, 2, 0, 0]),
+    )
+    requests = SimpleNamespace(all_token_ids=SimpleNamespace(gpu=torch.tensor([[7, 2, 4], [3, 5, 0]])))
+    replay = state.prepare_inputs(batch, requests)["inputs_embeds"]
+    assert replay.data_ptr() == captured.data_ptr()
+    torch.testing.assert_close(captured, torch.tensor([[5.0, 9.0], [4.0, 4.0], [0.0, 0.0], [0.0, 0.0]]))
+
+    # A later request refreshes the captured rows and clears previously live rows.
+    batch.num_tokens = batch.num_reqs = 1
+    batch.input_ids[0] = 6
+    replay = state.prepare_inputs(batch, requests)["inputs_embeds"]
+    assert replay.data_ptr() == captured.data_ptr()
+    torch.testing.assert_close(captured, torch.tensor([[6.0, 10.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]))
+
+    # Longer eager prefill batches use their own storage.
+    batch.num_tokens_after_padding = 6
+    eager = state.prepare_inputs(batch, requests)["inputs_embeds"]
+    assert eager.shape == (6, 2)
+    assert eager.data_ptr() != captured.data_ptr()

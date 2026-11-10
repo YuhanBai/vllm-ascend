@@ -1097,7 +1097,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         if indexer_metadata.num_actual_tokens == 0:
             return None
 
-        topk_selector = getattr(indexer_metadata, "topk_selector", None)
+        topk_selector = getattr(indexer_metadata, "topk_selector", None) or getattr(self, "topk_selector", None)
         if topk_selector is not None:
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         if self._sharded_dcp and indexer_metadata.kv_gather_block_ids is None:

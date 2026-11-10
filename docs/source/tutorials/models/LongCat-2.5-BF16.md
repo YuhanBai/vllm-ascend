@@ -1,7 +1,8 @@
 # LongCat-2.5 BF16 text inference
 
 This experimental path loads the original `meituan-longcat/LongCat-2.5` checkpoint on
-Ascend with Model Runner V2. It covers eager text prefill and generation.
+Ascend with Model Runner V2. Prefill runs in eager mode. Uniform decode can
+use ACLGraph via `FULL_DECODE_ONLY`.
 The checkpoint has approximately 3.56 TB of weights. Plan the tensor, expert
 and pipeline parallel layout around the per-rank weight and KV allocation.
 The first pipeline stage owns the sharded over-embedding tables.
@@ -21,6 +22,15 @@ vllm serve "$MODEL_PATH" \
 ```
 
 Set `MODEL_PATH`, `TP`, and `PP` for the BF16 checkpoint and deployed ranks.
+
+For ACLGraph decode, replace `--enforce-eager` with the following option.
+The `mode` value keeps Torch compilation disabled while enabling ACLGraph
+capture and replay.
+
+```bash
+--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8]}'
+```
+
 For the initial validation, send a short text prompt and a prompt with more
 than 2048 input tokens. Generate multiple tokens and compare against the
 FluentLLM BF16 path with the same token IDs. The longer prompt exercises the
@@ -33,5 +43,10 @@ LONGCAT25_SMOKE_BASE_URL=http://127.0.0.1:8000/v1 \
   pytest -q tests/e2e/models/test_longcat_25_bf16.py
 ```
 
+For graph validation, point `LONGCAT25_SMOKE_BASE_URL` to the graph server and
+`LONGCAT25_SMOKE_EAGER_BASE_URL` to an eager server using the same checkpoint
+and parallel layout. The test compares the generated token IDs. Check the
+graph server log for `ACL graph replay is active for the V2 target model`.
+
 Images, video, MTP, KV transfer, context parallelism, sequence parallelism,
-graph capture, and the W4A4 checkpoint are outside this text path.
+prefill graph capture, and the W4A4 checkpoint are outside this text path.

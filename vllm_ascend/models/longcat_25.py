@@ -9,8 +9,7 @@ from functools import partial
 import torch
 import torch_npu
 from torch import nn
-from torch.nn import functional as F
-from vllm.config import VllmConfig
+from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -36,12 +35,11 @@ from vllm.model_executor.models.utils import (
 
 from vllm_ascend.models.longcat_25_ops import (
     get_longcat_lightning_indexer,
-    over_embedding_ids,
     route_experts,
     select_longcat_topk,
 )
+from vllm_ascend.models.longcat_25_state import LongCat25ModelState
 from vllm_ascend.utils import enable_sp
-from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 _OE_WEIGHT = re.compile(r"oe_embed_(tokens|proj)([0-9]+)\.weight")
 
@@ -59,36 +57,6 @@ class LongCat25Embedding(NgramEmbedding):
         # The BF16 projection weights have already been scaled at load time.
         combined = word / (1 + self.num_embedders) + torch.bmm(oe, self.oe_projection).sum(dim=0)
         return torch.where(self.ignore_tokens[input_ids, None], word, combined)
-
-
-class LongCat25ModelState(AscendModelState):
-    supports_prompt_embeds = False
-
-    def prepare_inputs(self, input_batch, req_states):
-        inputs = super().prepare_inputs(input_batch, req_states)
-        embedding = self.model.model.ngram_embeddings
-        if embedding is None or input_batch.is_dummy or input_batch.num_tokens == 0:
-            return inputs
-
-        num_tokens = input_batch.num_tokens
-        num_reqs = input_batch.num_reqs
-        input_ids = input_batch.input_ids[:num_tokens].long()
-        offsets = input_batch.query_start_loc[: num_reqs + 1]
-        rows = torch.repeat_interleave(
-            input_batch.idx_mapping[:num_reqs].long(), offsets.diff(), output_size=num_tokens
-        )
-        distances = torch.arange(1, embedding.n, device=input_ids.device)
-        previous_positions = input_batch.positions[:num_tokens, None] - distances
-        # Read the scheduler's canonical history. Prefix hits, resumed requests
-        # and a reused request slot require no separate OE state to be repaired.
-        history = req_states.all_token_ids.gpu[rows[:, None], previous_positions.clamp_min(0)]
-        history = history.masked_fill(previous_positions < 0, -1)
-        oe_ids = over_embedding_ids(
-            input_ids, history, embedding.eos_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
-        )
-        embeds = embedding.embed_batched(input_ids, oe_ids)
-        inputs["inputs_embeds"] = F.pad(embeds, (0, 0, 0, input_batch.num_tokens_after_padding - num_tokens))
-        return inputs
 
 
 class LongCat25KeyProjection(nn.Module):
@@ -295,8 +263,15 @@ class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
             raise ValueError("LongCat-2.5 on Ascend currently requires the original BF16 checkpoint.")
         if (config.cli_factor, config.index_k_norm_type, config.zero_expert_type) != (2, "rms", "identity"):
             raise ValueError("Expected LongCat-2.5 paired MLA, RMS index normalization and identity experts.")
-        if not model.enforce_eager:
-            raise ValueError("LongCat-2.5 on Ascend currently requires --enforce-eager.")
+        compilation = vllm_config.compilation_config
+        if not model.enforce_eager and (
+            compilation.mode != CompilationMode.NONE
+            or compilation.cudagraph_mode not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+        ):
+            raise ValueError(
+                "LongCat-2.5 requires --enforce-eager or "
+                '--compilation-config \'{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}\'.'
+            )
         if (
             vllm_config.speculative_config is not None
             or vllm_config.kv_transfer_config is not None

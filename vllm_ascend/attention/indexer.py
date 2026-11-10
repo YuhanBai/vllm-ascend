@@ -502,7 +502,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_li_shape_ori = q_li.shape
             q_li, q_li_scale = self._quantize_li_tensor(q_li)
 
-        topk_selector = getattr(indexer_metadata, "topk_selector", None)
+        topk_selector = getattr(indexer_metadata, "topk_selector", None) or getattr(self, "topk_selector", None)
         if topk_selector is not None:
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
         return DeviceOperator.indexer_select_post_process(

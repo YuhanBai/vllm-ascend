@@ -1789,3 +1789,16 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** File: platform/patch_longcat_25_config.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY` and model architecture convertors
+#    Why:
+#       The LongCat-2.5 checkpoint uses pro_v and lacks the configuration code
+#       referenced by auto_map.
+#    How:
+#       Register a native config and an MLA architecture convertor for pro_v.
+#    Related PR:
+#       No upstream PR covers this checkpoint in the pinned vLLM revision.
+#    Future Plan:
+#       Drop these registrations once upstream vLLM supports pro_v natively.
+#

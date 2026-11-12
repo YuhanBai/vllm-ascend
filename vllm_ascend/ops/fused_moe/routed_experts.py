@@ -64,6 +64,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
+        vllm_config = get_current_vllm_config()
+        self._chunked_pp_expert_transpose = (
+            vllm_config.parallel_config.pipeline_parallel_size > 1
+            and vllm_config.model_config.hf_config.model_type == "pro_v"
+        )
         self.lora_context = None
         self._lora_routing = None
 
@@ -99,6 +104,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def supports_fused_activation(self, activation) -> bool:
         return False
 
+    def _transpose_expert_weights(self, weight: torch.Tensor) -> torch.Tensor:
+        weight = self._maybe_pad_weight(weight)
+        if not self._chunked_pp_expert_transpose or not weight.is_contiguous():
+            return weight.transpose(1, 2).contiguous()
+
+        # Each expert owns an independent storage region. Copy one transposed
+        # matrix at a time so PP does not need a second full expert tensor.
+        experts, rows, columns = weight.shape
+        transposed = weight.view(experts, columns, rows)
+        for expert in range(experts):
+            scratch = weight[expert].transpose(0, 1).contiguous()
+            transposed[expert].copy_(scratch)
+        return transposed
+
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
@@ -108,7 +127,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # reuse storage in the same place that chooses the expert weight format.
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
-            transposed = self._maybe_pad_weight(weight.data).transpose(1, 2).contiguous()
+            transposed = self._transpose_expert_weights(weight.data)
             if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
                 # NZ packing reads the NPU storage's base shape. Reusing the
                 # pre-transpose storage here would pack a rectangular matrix

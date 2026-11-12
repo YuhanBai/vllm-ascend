@@ -140,6 +140,18 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
             "source=...) and drive it with send_weights()."
         )
 
+    def start_weight_update(self) -> None:
+        super().start_weight_update()
+        begin = getattr(self.model, "begin_oe_weight_update", None)
+        if begin is not None:
+            begin()
+
+    def finish_weight_update(self) -> None:
+        verify = getattr(self.model, "verify_oe_weight_update", None)
+        if verify is not None:
+            verify()
+        super().finish_weight_update()
+
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
 
@@ -159,6 +171,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
             if update_info.tensor_sizes is None:
                 raise ValueError("`tensor_sizes` is required when packed=True")
             assert isinstance(update_info.ipc_handles, dict)
+            skip_prefixes = getattr(self.model, "IPC_SKIPPED_CHECKPOINT_PREFIXES", ())
             weights = packed_npu_ipc_consumer(
                 ipc_handle=update_info.ipc_handles,
                 physical_npu_id=physical_npu_id,
@@ -168,6 +181,9 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
                 importer=self._packed_importer,
+                stream_weights=bool(skip_prefixes),
+                skip_prefixes=skip_prefixes,
+                host_buffer_prefixes=getattr(self.model, "IPC_HOST_BUFFER_PREFIXES", ()),
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and

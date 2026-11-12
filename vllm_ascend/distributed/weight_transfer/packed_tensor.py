@@ -16,6 +16,7 @@ from vllm.logger import logger
 
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = upstream.DEFAULT_PACKED_BUFFER_SIZE_BYTES
 DEFAULT_PACKED_NUM_BUFFERS = upstream.DEFAULT_PACKED_NUM_BUFFERS
+_IPC_HOST_STAGING_BYTES = 64 * 1024**2
 
 # Upstream caches streams across communicators on each device.
 # Reject overlaps through cleanup; callers must order transfers consistently across ranks.
@@ -48,7 +49,6 @@ def _get_hccl_streams(device_idx: int, num_buffers: int) -> list[Any]:
     if len(streams) != num_buffers:
         raise RuntimeError("Incompatible vLLM packed stream count; check the supported vLLM pairing")
     return streams
-
 
 # On a failed stream drain, keep storage alive until process exit. Its async
 # users may still be running, so returning it to the allocator is unsafe.
@@ -314,6 +314,7 @@ def packed_npu_ipc_producer(
     total_bytes = 0
 
     checked = _checked_callback(post_iter_func)
+    cpu_staging = None
     for name, orig_tensor in iterator:
         flat = checked((name, orig_tensor)).contiguous().reshape(-1).view(torch.uint8)
 
@@ -336,7 +337,21 @@ def packed_npu_ipc_producer(
             names, shapes, dtypes, tensor_sizes = [], [], [], []
             total_bytes = 0
 
-        ipc_buffer[total_bytes : total_bytes + flat.numel()].copy_(flat)
+        destination = ipc_buffer[total_bytes : total_bytes + flat.numel()]
+        if flat.device.type == "cpu" and flat.numel():
+            # A reusable pinned block bounds host RSS even when an OE
+            # tensor spans many GiB and all ranks copy from the same mmap.
+            if cpu_staging is None:
+                cpu_staging = torch.empty(_IPC_HOST_STAGING_BYTES, dtype=torch.uint8, device="cpu", pin_memory=True)
+            stream = torch.npu.current_stream()
+            for offset in range(0, flat.numel(), cpu_staging.numel()):
+                length = min(flat.numel() - offset, cpu_staging.numel())
+                staged = cpu_staging[:length]
+                staged.copy_(flat[offset : offset + length])
+                destination[offset : offset + length].copy_(staged, non_blocking=True)
+                stream.synchronize()
+        else:
+            destination.copy_(flat)
         names.append(name)
         shapes.append(list(orig_tensor.shape))
         dtypes.append(orig_tensor.dtype)
@@ -379,7 +394,11 @@ def packed_npu_ipc_consumer(
     tensor_sizes: list[int],
     device_index: int,
     importer: PackedBufferImporter | None = None,
-) -> list[tuple[str, torch.Tensor]]:
+    *,
+    stream_weights: bool = False,
+    skip_prefixes: tuple[str, ...] = (),
+    host_buffer_prefixes: tuple[str, ...] = (),
+) -> list[tuple[str, torch.Tensor]] | Iterator[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
     Reconstructs the packed buffer via the IPC handle, unpacks into
@@ -402,6 +421,9 @@ def packed_npu_ipc_consumer(
         importer: ``None`` is safe only for single-chunk exports. For a
             multi-chunk export, pass the same importer for every chunk so
             the shared mapping is rebuilt only once.
+        stream_weights: Clone lazily during weight loading to reduce peak HBM.
+        skip_prefixes: Checkpoint-only tensors the receiver's model does not load.
+        host_buffer_prefixes: Checkpoint tensors retained on host by layerwise reload.
     """
     if not isinstance(device_index, int) or isinstance(device_index, bool) or device_index < 0:
         raise ValueError(f"device_index must be a non-negative integer, got {device_index!r}")
@@ -441,12 +463,32 @@ def packed_npu_ipc_consumer(
         raise ValueError(f"packed IPC metadata declares {content_size} bytes, buffer has {packed.numel()}")
     packed = packed[:content_size]
 
-    weights: list[tuple[str, torch.Tensor]] = []
-    offset = 0
-    for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
-        raw = packed[offset : offset + size]
-        tensor = raw.clone().view(dtype).reshape(shape)
-        weights.append((name, tensor))
-        offset += size
+    def iter_weights() -> Iterator[tuple[str, torch.Tensor]]:
+        offset = 0
+        host_staging = None
+        for name, shape, dtype, size in zip(names, shapes, dtypes, tensor_sizes):
+            end = offset + size
+            if not name.startswith(skip_prefixes):
+                raw = packed[offset:end]
+                # The layerwise loader can retain tensors beyond this chunk.
+                # Decoder inputs use CPU storage as in checkpoint reload.
+                if name.startswith(host_buffer_prefixes):
+                    independent = torch.empty(size, dtype=torch.uint8, device="cpu")
+                    if host_staging is None:
+                        host_staging = torch.empty(
+                            _IPC_HOST_STAGING_BYTES, dtype=torch.uint8, device="cpu", pin_memory=True
+                        )
+                    stream = torch.npu.current_stream(device_index)
+                    for start in range(0, size, host_staging.numel()):
+                        length = min(size - start, host_staging.numel())
+                        staged = host_staging[:length]
+                        staged.copy_(raw[start : start + length], non_blocking=True)
+                        stream.synchronize()
+                        independent[start : start + length].copy_(staged)
+                else:
+                    independent = raw.clone()
+                yield name, independent.view(dtype).reshape(shape)
+            offset = end
 
-    return weights
+    weights = iter_weights()
+    return weights if stream_weights else list(weights)

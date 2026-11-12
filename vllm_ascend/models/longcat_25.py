@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.model_executor.models.longcat_flash import (
     FlashDecoderLayer,
@@ -50,6 +51,33 @@ class LongCat25Embedding(NgramEmbedding):
         ignore = torch.zeros(config.vocab_size, dtype=torch.bool)
         ignore[config.oe_ignored_token_ids] = True
         self.register_buffer("ignore_tokens", ignore, persistent=False)
+
+    def load_weight(self, weight_name, loaded_weight):
+        # The upstream OE loader writes slices directly. During layerwise
+        # reload its destination is a meta placeholder. Update the saved
+        # physical parameter so finalization retains the graph-bound storage.
+        token_key = "ngram_embeddings.embedders."
+        proj_key = "ngram_embeddings.post_projs."
+        if weight_name.startswith(token_key) and self.oe_embedder.weight.is_meta:
+            index = int(weight_name[len(token_key) :].split(".")[0])
+            lo, hi = self._offsets[index : index + 2]
+            assert hi - lo == loaded_weight.shape[0]
+            info = get_layerwise_info(self.oe_embedder)
+            target = info.kernel_tensors[0]["weight"]
+            shard = self.oe_embedder.shard_indices
+            start = max(lo, shard.org_vocab_start_index)
+            end = min(hi, shard.org_vocab_end_index)
+            if start < end:
+                target.data[start - shard.org_vocab_start_index : end - shard.org_vocab_start_index].copy_(
+                    loaded_weight[start - lo : end - lo]
+                )
+            return "ngram_embeddings.oe_embedder.weight"
+        if weight_name.startswith(proj_key) and self.oe_projection.is_meta:
+            index = int(weight_name[len(proj_key) :].split(".")[0])
+            info = get_layerwise_info(self)
+            info.kernel_tensors[0]["oe_projection"].data[index].copy_(loaded_weight.t())
+            return "ngram_embeddings.oe_projection"
+        return super().load_weight(weight_name, loaded_weight)
 
     def embed_batched(self, input_ids, oe_ids):
         word = self.word_embeddings(input_ids)
@@ -129,6 +157,7 @@ class LongCat25DecoderLayer(FlashDecoderLayer):
         # DeepSeek's skip pattern is indexed by decoder block, not by attention
         # sublayer. Give only the second MLA instance the skip pattern.
         consumer_config.index_topk_pattern = "S" * config.num_layers
+        consumer_config.indexer_types = ["shared"] * config.num_layers
         self.self_attn = nn.ModuleList(
             DeepseekV2MLAAttention(
                 vllm_config=vllm_config,
@@ -180,6 +209,8 @@ class LongCat25DecoderLayer(FlashDecoderLayer):
 class LongCat25Model(FlashModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str):
         nn.Module.__init__(self)
+        # This model permits eager or decode ACLGraph with Dynamo disabled.
+        self.do_not_compile = True
         config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = None
@@ -235,6 +266,9 @@ class LongCat25Model(FlashModel):
 
 class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
     """BF16 text generation from the official LongCat-2.5 checkpoint."""
+
+    IPC_SKIPPED_CHECKPOINT_PREFIXES = ("model.mtp.", "model.visual_model.", "model.visual_bridge_model.")
+    IPC_HOST_BUFFER_PREFIXES = ("model.layers.",)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
@@ -299,20 +333,34 @@ class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
 
         def track_oe_weights():
             for name, weight in weights:
+                if name.startswith(self.IPC_SKIPPED_CHECKPOINT_PREFIXES):
+                    continue
                 if _OE_WEIGHT.fullmatch(name.removeprefix("model.")):
                     oe_names.add(name)
                 yield name, weight
 
-        loader = AutoWeightsLoader(
-            self, skip_prefixes=["model.mtp.", "model.visual_model.", "model.visual_bridge_model."]
-        )
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(track_oe_weights())
-        if self.model.ngram_embeddings is not None:
-            expected = {
-                f"model.oe_embed_{kind}{i}.weight"
-                for kind in ("tokens", "proj")
-                for i in range(self.model.ngram_embeddings.num_embedders)
-            }
-            if missing := expected - oe_names:
-                raise ValueError(f"LongCat-2.5 checkpoint is missing OE weights: {sorted(missing)}")
+        pending = getattr(self, "_oe_update_names", None)
+        if pending is None:
+            self._check_oe_weights(oe_names)
+        else:
+            pending.update(oe_names)
         return loaded
+
+    def begin_oe_weight_update(self):
+        self._oe_update_names = set()
+
+    def verify_oe_weight_update(self):
+        self._check_oe_weights(self._oe_update_names)
+        self._oe_update_names = None
+
+    def _check_oe_weights(self, names):
+        embedding = self.model.ngram_embeddings
+        if embedding is None:
+            return
+        expected = {
+            f"model.oe_embed_{kind}{i}.weight" for kind in ("tokens", "proj") for i in range(embedding.num_embedders)
+        }
+        if missing := expected - names:
+            raise ValueError(f"LongCat-2.5 checkpoint is missing OE weights: {sorted(missing)}")

@@ -65,6 +65,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
+        self._chunked_pp_expert_transpose = (
+            vllm_config.parallel_config.pipeline_parallel_size > 1
+            and vllm_config.model_config.hf_config.model_type == "pro_v"
+        )
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.lora_context = None
         self._lora_routing = None
@@ -101,14 +105,28 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def supports_fused_activation(self, activation) -> bool:
         return False
 
+    def _transpose_expert_weights(self, weight: torch.Tensor) -> torch.Tensor:
+        weight = self._maybe_pad_weight(weight)
+        if not self._chunked_pp_expert_transpose or not weight.is_contiguous():
+            return weight.transpose(1, 2).contiguous()
+
+        # Each expert owns an independent storage region. Copy one transposed
+        # matrix at a time so PP does not need a second full expert tensor.
+        experts, rows, columns = weight.shape
+        transposed = weight.view(experts, columns, rows)
+        for expert in range(experts):
+            scratch = weight[expert].transpose(0, 1).contiguous()
+            transposed[expert].copy_(scratch)
+        return transposed
+
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         # Keep expert-aware loaders attached for later online weight updates.
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
+        w13_data = self._transpose_expert_weights(layer.w13_weight.data)
         replace_parameter(layer, "w13_weight", w13_data)
 
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
+        w2_data = self._transpose_expert_weights(layer.w2_weight.data)
         replace_parameter(layer, "w2_weight", w2_data)
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.

@@ -414,7 +414,11 @@ def select_moe_comm_method(
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
-    if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
+    if (
+        vllm_config.model_config.hf_text_config.model_type == "pro_v"
+        or not vllm_config.parallel_config.enable_expert_parallel
+        or get_ep_group().world_size == 1
+    ):
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
         # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths

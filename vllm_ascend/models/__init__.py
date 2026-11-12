@@ -7,6 +7,10 @@ def register_model():
         "vllm_ascend.models.longcat_25:AscendLongCat25ForCausalLM",
     )
     ModelRegistry.register_model(
+        "LongcatFlashVLForConditionalGeneration",
+        "vllm_ascend.models.longcat_25_multimodal:AscendLongCat25ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
         "Qwen4ExpForCausalLM",
         "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",
     )

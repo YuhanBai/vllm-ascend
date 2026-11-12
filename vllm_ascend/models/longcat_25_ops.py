@@ -9,6 +9,9 @@ from pathlib import Path
 
 import torch
 
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.models.longcat950_indexer import lightning_indexer_with_mandatory_tokens
+
 
 def route_experts(logits, bias, topk, num_experts, scale):
     probs = logits.softmax(dim=-1, dtype=torch.float32)
@@ -36,6 +39,15 @@ def over_embedding_ids(input_ids, history, eos_id, weights, moduli, offsets):
 @cache
 def get_longcat_lightning_indexer():
     """Find the BF16 Lightning Indexer with LongCat's mandatory-token inputs."""
+    native_op = getattr(torch.ops.npu, "npu_lightning_indexer", None)
+    if (
+        native_op is not None
+        and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+    ):
+        if _supports_init_and_local(native_op):
+            return native_op
+        return lightning_indexer_with_mandatory_tokens
+
     for namespace in (torch.ops.npu, torch.ops.custom):
         op = getattr(namespace, "npu_lightning_indexer", None)
         if op is not None and _supports_init_and_local(op):

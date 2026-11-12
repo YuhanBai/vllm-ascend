@@ -4,6 +4,7 @@
 import torch
 from torch.nn import functional as F
 from vllm.config import CUDAGraphMode
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
 from vllm_ascend.models.longcat_25_ops import over_embedding_ids
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -35,7 +36,7 @@ class LongCat25ModelState(AscendModelState):
 
     def prepare_inputs(self, input_batch, req_states):
         inputs = super().prepare_inputs(input_batch, req_states)
-        if self.embedding is None:
+        if self.embedding is None or self.supports_mm_inputs:
             return inputs
 
         num_tokens = input_batch.num_tokens
@@ -50,13 +51,34 @@ class LongCat25ModelState(AscendModelState):
             return inputs
 
         embeds = self._compute_over_embeddings(input_batch, req_states)
-        if graph_embeds is None:
-            inputs["inputs_embeds"] = F.pad(embeds, (0, 0, 0, num_padded - num_tokens))
-        else:
-            graph_embeds[:num_tokens].copy_(embeds)
-            graph_embeds[num_tokens:].zero_()
-            inputs["inputs_embeds"] = graph_embeds
+        inputs["inputs_embeds"] = self._pad_embeddings(embeds, num_padded, graph_embeds)
         return inputs
+
+    def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states):
+        if not self.supports_mm_inputs or self.embedding is None:
+            return super().prepare_inputs_embeds(scheduled_encoder_inputs, input_batch, req_states)
+
+        self.execute_mm_encoder(scheduled_encoder_inputs)
+        multimodal_embeddings, is_multimodal = self.gather_mm_embeddings(input_batch)
+        embeds = self._compute_over_embeddings(input_batch, req_states)
+        if multimodal_embeddings:
+            embeds = _merge_multimodal_embeddings(embeds, multimodal_embeddings, is_multimodal)
+
+        num_padded = input_batch.num_tokens_after_padding
+        graph_buffer = self._graph_embeds
+        graph_embeds = (
+            graph_buffer[:num_padded] if graph_buffer is not None and num_padded <= len(graph_buffer) else None
+        )
+        return self._pad_embeddings(embeds, num_padded, graph_embeds)
+
+    @staticmethod
+    def _pad_embeddings(embeds, num_padded, graph_embeds):
+        num_tokens = embeds.shape[0]
+        if graph_embeds is None:
+            return F.pad(embeds, (0, 0, 0, num_padded - num_tokens))
+        graph_embeds[:num_tokens].copy_(embeds)
+        graph_embeds[num_tokens:].zero_()
+        return graph_embeds
 
     def _compute_over_embeddings(self, input_batch, req_states):
         embedding = self.embedding
@@ -73,7 +95,10 @@ class LongCat25ModelState(AscendModelState):
         # and a reused request slot require no separate OE state to be repaired.
         history = req_states.all_token_ids.gpu[rows[:, None], previous_positions.clamp_min(0)]
         history = history.masked_fill(previous_positions < 0, -1)
+        eos_token_id = getattr(embedding, "eos_token_id", None)
+        if eos_token_id is None:
+            eos_token_id = embedding.eos_id
         oe_ids = over_embedding_ids(
-            input_ids, history, embedding.eos_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
+            input_ids, history, eos_token_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
         )
         return embedding.embed_batched(input_ids, oe_ids)

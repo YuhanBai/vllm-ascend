@@ -141,6 +141,18 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
                 params[name] = fixed if fixed is not None else requested
         return params
 
+    def start_weight_update(self) -> None:
+        super().start_weight_update()
+        begin = getattr(self.model, "begin_oe_weight_update", None)
+        if begin is not None:
+            begin()
+
+    def finish_weight_update(self) -> None:
+        verify = getattr(self.model, "verify_oe_weight_update", None)
+        if verify is not None:
+            verify()
+        super().finish_weight_update()
+
     def receive_weights(self, update_info: HCCLWeightTransferUpdateInfo) -> None:  # type: ignore[override]
         """Receive one round over the NPU data plane and load it layerwise."""
         if self.model_update_group is None:
@@ -170,6 +182,8 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
                     post_unpack_func=self.model.load_weights,
                     buffer_size_bytes=params["packed_buffer_size_bytes"],
                     num_buffers=params["packed_num_buffers"],
+                    skip_prefixes=getattr(self.model, "IPC_SKIPPED_CHECKPOINT_PREFIXES", ()),
+                    host_buffer_prefixes=getattr(self.model, "IPC_HOST_BUFFER_PREFIXES", ()),
                 )
             else:
                 for name, shape, dtype in metadata:

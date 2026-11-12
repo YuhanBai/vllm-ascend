@@ -167,6 +167,9 @@ def packed_broadcast_consumer(
     post_unpack_func: Callable[[list[tuple[str, torch.Tensor]]], None],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    *,
+    skip_prefixes: tuple[str, ...] = (),
+    host_buffer_prefixes: tuple[str, ...] = (),
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
@@ -196,12 +199,28 @@ def packed_broadcast_consumer(
     ) -> list[tuple[str, torch.Tensor]]:
         """Unpack named tensors with their declared dtypes and shapes."""
         unpacked_tensors = packed_tensor.split(tensor_sizes)
-        unpacked_list = [
-            # Preserve independent storage for callbacks that retain or mutate
-            # inputs. Cloning bytes first also fixes unaligned dtype views.
-            (name, tensor.clone().view(dtype).reshape(shape))
-            for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
-        ]
+        unpacked_list = []
+        host_staging = None
+        for name, shape, dtype, raw in zip(names, shapes, dtypes, unpacked_tensors):
+            if name.startswith(skip_prefixes):
+                continue
+            if name.startswith(host_buffer_prefixes):
+                size = raw.numel()
+                independent = torch.empty(size, dtype=torch.uint8, device="cpu")
+                if host_staging is None:
+                    host_staging = torch.empty(
+                        _IPC_HOST_STAGING_BYTES, dtype=torch.uint8, device="cpu", pin_memory=True
+                    )
+                stream = torch.npu.current_stream()
+                for start in range(0, size, host_staging.numel()):
+                    length = min(size - start, host_staging.numel())
+                    staged = host_staging[:length]
+                    staged.copy_(raw[start : start + length], non_blocking=True)
+                    stream.synchronize()
+                    independent[start : start + length].copy_(staged)
+            else:
+                independent = raw.clone()
+            unpacked_list.append((name, independent.view(dtype).reshape(shape)))
         return unpacked_list
 
     if buffer_size_bytes <= 0 or num_buffers <= 0:

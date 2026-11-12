@@ -198,6 +198,9 @@ def packed_broadcast_consumer(
     post_unpack_func: Callable[[list[tuple[str, torch.Tensor]]], None],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    *,
+    skip_prefixes: tuple[str, ...] = (),
+    host_buffer_prefixes: tuple[str, ...] = (),
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
@@ -219,6 +222,8 @@ def packed_broadcast_consumer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
+        skip_prefixes: Checkpoint-only tensors the receiver's model does not load.
+        host_buffer_prefixes: Checkpoint tensors retained on host by layerwise reload.
     """
     if buffer_size_bytes <= 0 or num_buffers <= 0:
         raise ValueError(
@@ -230,10 +235,11 @@ def packed_broadcast_consumer(
     # Clone each byte slice before restoring its dtype and shape.
     expected: list[tuple[list[int], torch.dtype]] = []
     previous_load: Any = None
+    host_staging: torch.Tensor | None = None
 
     def owning(tensors: list[tuple[str, torch.Tensor]]) -> None:
         """Restore aligned, independent storage and order cross-slot loader reads."""
-        nonlocal previous_load
+        nonlocal previous_load, host_staging
         stream = torch.npu.current_stream()
         # Upstream's wait_event covers receives, but our async clones run later.
         # Chain callback completion to order cross-slot reads of those clones.
@@ -241,10 +247,27 @@ def packed_broadcast_consumer(
             stream.wait_event(previous_load)
         restored = []
         for (name, raw), (shape, dtype) in zip(tensors, expected):
-            tensor = raw.clone().view(dtype).reshape(shape)
-            # Retained clones may be read on later slot or caller streams.
-            for reader in reader_streams:
-                tensor.record_stream(reader)
+            if name.startswith(skip_prefixes):
+                continue
+            if name.startswith(host_buffer_prefixes):
+                size = raw.numel()
+                independent = torch.empty(size, dtype=torch.uint8, device="cpu")
+                if host_staging is None:
+                    host_staging = torch.empty(
+                        _IPC_HOST_STAGING_BYTES, dtype=torch.uint8, device="cpu", pin_memory=True
+                    )
+                for start in range(0, size, host_staging.numel()):
+                    length = min(size - start, host_staging.numel())
+                    staged = host_staging[:length]
+                    staged.copy_(raw[start : start + length], non_blocking=True)
+                    stream.synchronize()
+                    independent[start : start + length].copy_(staged)
+                tensor = independent.view(dtype).reshape(shape)
+            else:
+                tensor = raw.clone().view(dtype).reshape(shape)
+                # Retained clones may be read on later slot or caller streams.
+                for reader in reader_streams:
+                    tensor.record_stream(reader)
             restored.append((name, tensor))
         del expected[: len(tensors)]
         try:

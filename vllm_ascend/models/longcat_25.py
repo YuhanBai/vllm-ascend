@@ -229,7 +229,9 @@ class LongCat25Model(FlashModel):
             dtype=torch.int32,
             device=vllm_config.device_config.device,
         )
-        indexer_op = get_longcat_lightning_indexer()
+        indexer_op = get_longcat_lightning_indexer(
+            use_triton=(vllm_config.additional_config or {}).get("longcat_indexer_triton", False)
+        )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_layers,
             lambda prefix: LongCat25DecoderLayer(vllm_config, prefix, topk_buffer, indexer_op),

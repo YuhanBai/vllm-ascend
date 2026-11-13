@@ -3,7 +3,7 @@
 
 import ctypes
 from contextlib import suppress
-from functools import cache
+from functools import cache, partial
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -37,7 +37,7 @@ def over_embedding_ids(input_ids, history, eos_id, weights, moduli, offsets):
 
 
 @cache
-def get_longcat_lightning_indexer():
+def get_longcat_lightning_indexer(use_triton=False):
     """Find the BF16 Lightning Indexer with LongCat's mandatory-token inputs."""
     native_op = getattr(torch.ops.npu, "npu_lightning_indexer", None)
     if (
@@ -46,7 +46,11 @@ def get_longcat_lightning_indexer():
     ):
         if _supports_init_and_local(native_op):
             return native_op
-        return lightning_indexer_with_mandatory_tokens
+        return (
+            partial(lightning_indexer_with_mandatory_tokens, use_triton=True)
+            if use_triton
+            else lightning_indexer_with_mandatory_tokens
+        )
 
     for namespace in (torch.ops.npu, torch.ops.custom):
         op = getattr(namespace, "npu_lightning_indexer", None)

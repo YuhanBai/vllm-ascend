@@ -5,6 +5,7 @@ import torch
 from torch.nn import functional as F
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings
+from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.models.longcat_25_ops import over_embedding_ids
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -16,6 +17,11 @@ class LongCat25ModelState(AscendModelState):
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
         self.embedding = model.model.ngram_embeddings
+        self._over_embedding_ids = over_embedding_ids
+        if HAS_TRITON and self.device.type == "npu" and (vllm_config.additional_config or {}).get("longcat_oe_triton"):
+            from vllm_ascend.ops.triton.over_embedding_ids import over_embedding_ids_triton
+
+            self._over_embedding_ids = over_embedding_ids_triton
         self._graph_embeds = None
         compilation = vllm_config.compilation_config
         if (
@@ -98,7 +104,7 @@ class LongCat25ModelState(AscendModelState):
         eos_token_id = getattr(embedding, "eos_token_id", None)
         if eos_token_id is None:
             eos_token_id = embedding.eos_id
-        oe_ids = over_embedding_ids(
+        oe_ids = self._over_embedding_ids(
             input_ids, history, eos_token_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
         )
         return embedding.embed_batched(input_ids, oe_ids)

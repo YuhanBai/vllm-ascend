@@ -1,6 +1,7 @@
 """Ascend 950 BF16 Lightning Indexer reference-compatible composition."""
 
 import torch
+from vllm.triton_utils import HAS_TRITON
 
 
 def lightning_indexer_with_mandatory_tokens(
@@ -17,6 +18,7 @@ def lightning_indexer_with_mandatory_tokens(
     sparse_mode,
     init_tensor,
     local_tensor,
+    use_triton=False,
 ):
     if layout_query != "TND" or layout_key != "PA_BSND" or sparse_mode != 3:
         raise ValueError("LongCat Ascend950 expects TND/PA_BSND causal Lightning Indexer")
@@ -56,16 +58,23 @@ def lightning_indexer_with_mandatory_tokens(
     middle = (chosen >= prefix) & (chosen < valid_len - local)
     # Ascend 950 returns paged candidates in index order. Rescore only these
     # candidates with the LongCat FP32 ReLU-dot and head-weight reduction.
-    block_size = key.shape[1]
-    scores_chunks = []
-    for start in range(0, query.shape[0], 32):
-        stop = start + 32
-        safe_indices = chosen[start:stop].clamp_min(0).long()
-        physical = block_table[sequence[start:stop, None], safe_indices // block_size].clamp_min(0)
-        candidate_keys = key[physical.long(), safe_indices % block_size, 0].float()
-        logits = torch.bmm(query[start:stop].float(), candidate_keys.transpose(1, 2))
-        scores_chunks.append((logits.relu() * weights[start:stop, :, None].float()).sum(dim=1))
-    scores_native = torch.where(middle, torch.cat(scores_chunks), -torch.inf)
+    if use_triton and HAS_TRITON and query.device.type == "npu" and query.shape[-1] == 128:
+        from vllm_ascend.ops.triton.lightning_indexer_rescore import rescore_candidates_triton
+
+        scores_native = rescore_candidates_triton(
+            query, key, weights, block_table, sequence, chosen, prefix, valid_len - local
+        )
+    else:
+        block_size = key.shape[1]
+        scores_chunks = []
+        for start in range(0, query.shape[0], 32):
+            stop = start + 32
+            safe_indices = chosen[start:stop].clamp_min(0).long()
+            physical = block_table[sequence[start:stop, None], safe_indices // block_size].clamp_min(0)
+            candidate_keys = key[physical.long(), safe_indices % block_size, 0].float()
+            logits = torch.bmm(query[start:stop].float(), candidate_keys.transpose(1, 2))
+            scores_chunks.append((logits.relu() * weights[start:stop, :, None].float()).sum(dim=1))
+        scores_native = torch.where(middle, torch.cat(scores_chunks), -torch.inf)
 
     # The mandatory set removes at most its own size from the native top-k,
     # so the remaining native prefix contains enough highest-scoring entries.

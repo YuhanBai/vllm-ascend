@@ -19,14 +19,14 @@ class LongCat25ModelState(AscendModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
         self.embedding = model.model.ngram_embeddings
         self._over_embedding_ids = over_embedding_ids
-        if HAS_TRITON and self.device.type == "npu":
-            use_triton = (vllm_config.additional_config or {}).get("longcat_oe_triton")
-            if use_triton is None:
-                use_triton = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-            if use_triton:
-                from vllm_ascend.ops.triton.over_embedding_ids import over_embedding_ids_triton
+        if (
+            HAS_TRITON
+            and self.device.type == "npu"
+            and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        ):
+            from vllm_ascend.ops.triton.over_embedding_ids import over_embedding_ids_triton
 
-                self._over_embedding_ids = over_embedding_ids_triton
+            self._over_embedding_ids = over_embedding_ids_triton
         self._graph_embeds = None
         compilation = vllm_config.compilation_config
         if (

@@ -1827,6 +1827,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "refresh",
         # LongCat model code reads these switches from VllmConfig.additional_config.
         "longcat_oe_triton",
+        "longcat_indexer_triton",
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
         # backend selector; Ascend supports only the triton value (FLA kernels
         # run via triton-ascend), and the triton default applies either way

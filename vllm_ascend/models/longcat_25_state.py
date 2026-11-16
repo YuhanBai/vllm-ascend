@@ -18,15 +18,15 @@ class LongCat25ModelState(AscendModelState):
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
         self.embedding = model.model.ngram_embeddings
-        self._over_embedding_ids = over_embedding_ids
+        self._over_embedding_ids_from_token_table = None
         if (
             HAS_TRITON
             and self.device.type == "npu"
             and get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         ):
-            from vllm_ascend.ops.triton.over_embedding_ids import over_embedding_ids_triton
+            from vllm_ascend.ops.triton.over_embedding_ids import over_embedding_ids_from_token_table
 
-            self._over_embedding_ids = over_embedding_ids_triton
+            self._over_embedding_ids_from_token_table = over_embedding_ids_from_token_table
         self._graph_embeds = None
         compilation = vllm_config.compilation_config
         if (
@@ -96,20 +96,43 @@ class LongCat25ModelState(AscendModelState):
         num_tokens = input_batch.num_tokens
         num_reqs = input_batch.num_reqs
         input_ids = input_batch.input_ids[:num_tokens].long()
-        offsets = input_batch.query_start_loc[: num_reqs + 1]
-        rows = torch.repeat_interleave(
-            input_batch.idx_mapping[:num_reqs].long(), offsets.diff(), output_size=num_tokens
-        )
-        distances = torch.arange(1, embedding.n, device=input_ids.device)
-        previous_positions = input_batch.positions[:num_tokens, None] - distances
+        positions = input_batch.positions[:num_tokens]
+        rows = input_batch.idx_mapping[:num_reqs]
+        compute_from_token_table = self._over_embedding_ids_from_token_table
+        # Equal batch counts alone can also occur with empty or multi-token requests.
+        offsets_cpu = input_batch.query_start_loc_np
+        if (
+            compute_from_token_table is None
+            or num_tokens != num_reqs
+            or offsets_cpu is None
+            or not ((offsets_cpu[1 : num_reqs + 1] - offsets_cpu[:num_reqs]) == 1).all()
+        ):
+            offsets = input_batch.query_start_loc[: num_reqs + 1]
+            rows = torch.repeat_interleave(rows.long(), offsets.diff(), output_size=num_tokens)
         # Read the scheduler's canonical history. Prefix hits, resumed requests
         # and a reused request slot require no separate OE state to be repaired.
-        history = req_states.all_token_ids.gpu[rows[:, None], previous_positions.clamp_min(0)]
-        history = history.masked_fill(previous_positions < 0, -1)
+        token_table = req_states.all_token_ids.gpu
         eos_token_id = getattr(embedding, "eos_token_id", None)
         if eos_token_id is None:
             eos_token_id = embedding.eos_id
-        oe_ids = self._over_embedding_ids(
-            input_ids, history, eos_token_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
-        )
-        return embedding.embed_batched(input_ids, oe_ids)
+        if compute_from_token_table is not None:
+            table_ids = compute_from_token_table(
+                input_ids,
+                token_table,
+                positions,
+                rows,
+                eos_token_id,
+                embedding.ne_weights,
+                embedding.ne_mods,
+                embedding.exclusive_sizes,
+            )
+        else:
+            distances = torch.arange(1, embedding.n, device=input_ids.device)
+            previous_positions = positions[:, None] - distances
+            history = token_table[rows[:, None], previous_positions.clamp_min(0)]
+            history = history.masked_fill(previous_positions < 0, -1)
+            token_ids = over_embedding_ids(
+                input_ids, history, eos_token_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
+            )
+            table_ids = token_ids.T.contiguous()
+        return embedding.embed_batched(input_ids, table_ids)

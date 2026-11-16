@@ -79,9 +79,9 @@ class LongCat25Embedding(NgramEmbedding):
             return "ngram_embeddings.oe_projection"
         return super().load_weight(weight_name, loaded_weight)
 
-    def embed_batched(self, input_ids, oe_ids):
+    def embed_batched(self, input_ids, table_ids):
         word = self.word_embeddings(input_ids)
-        oe = self.oe_embedder(oe_ids.T.contiguous())
+        oe = self.oe_embedder(table_ids)
         # The BF16 projection weights have already been scaled at load time.
         combined = word / (1 + self.num_embedders) + torch.bmm(oe, self.oe_projection).sum(dim=0)
         return torch.where(self.ignore_tokens[input_ids, None], word, combined)

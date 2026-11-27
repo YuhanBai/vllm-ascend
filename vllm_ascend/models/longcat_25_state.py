@@ -71,7 +71,11 @@ class LongCat25ModelState(AscendModelState):
 
         self.execute_mm_encoder(scheduled_encoder_inputs)
         multimodal_embeddings, is_multimodal = self.gather_mm_embeddings(input_batch)
-        embeds = self._compute_over_embeddings(input_batch, req_states)
+        self._mm_skip_mask = is_multimodal if multimodal_embeddings else None
+        try:
+            embeds = self._compute_over_embeddings(input_batch, req_states)
+        finally:
+            self._mm_skip_mask = None
         if multimodal_embeddings:
             embeds = _merge_multimodal_embeddings(embeds, multimodal_embeddings, is_multimodal)
 
@@ -99,16 +103,31 @@ class LongCat25ModelState(AscendModelState):
         positions = input_batch.positions[:num_tokens]
         rows = input_batch.idx_mapping[:num_reqs]
         compute_from_token_table = self._over_embedding_ids_from_token_table
+        skip_mask = getattr(self, "_mm_skip_mask", None)
         # Equal batch counts alone can also occur with empty or multi-token requests.
         offsets_cpu = input_batch.query_start_loc_np
         if (
-            compute_from_token_table is None
+            skip_mask is not None
+            or compute_from_token_table is None
             or num_tokens != num_reqs
             or offsets_cpu is None
             or not ((offsets_cpu[1 : num_reqs + 1] - offsets_cpu[:num_reqs]) == 1).all()
         ):
             offsets = input_batch.query_start_loc[: num_reqs + 1]
             rows = torch.repeat_interleave(rows.long(), offsets.diff(), output_size=num_tokens)
+
+        text_indices = None
+        if skip_mask is not None:
+            text_indices = (~skip_mask[:num_tokens]).nonzero(as_tuple=False).squeeze(-1)
+            if text_indices.numel() == 0:
+                return torch.empty((num_tokens, self.inputs_embeds_size), dtype=self.dtype, device=self.device)
+            if text_indices.numel() < num_tokens:
+                input_ids = input_ids.index_select(0, text_indices)
+                positions = positions.index_select(0, text_indices)
+                rows = rows.index_select(0, text_indices)
+            else:
+                text_indices = None
+
         # Read the scheduler's canonical history. Prefix hits, resumed requests
         # and a reused request slot require no separate OE state to be repaired.
         token_table = req_states.all_token_ids.gpu
@@ -135,4 +154,9 @@ class LongCat25ModelState(AscendModelState):
                 input_ids, history, eos_token_id, embedding.ne_weights, embedding.ne_mods, embedding.exclusive_sizes
             )
             table_ids = token_ids.T.contiguous()
-        return embedding.embed_batched(input_ids, table_ids)
+        text_embeds = embedding.embed_batched(input_ids, table_ids)
+        if text_indices is None:
+            return text_embeds
+        embeds = torch.empty((num_tokens, text_embeds.shape[-1]), dtype=text_embeds.dtype, device=text_embeds.device)
+        embeds.index_copy_(0, text_indices, text_embeds)
+        return embeds

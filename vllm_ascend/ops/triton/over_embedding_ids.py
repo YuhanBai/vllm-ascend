@@ -26,36 +26,52 @@ def _over_embedding_ids(
     N: tl.constexpr,
     SPLITS: tl.constexpr,
     TABLES: tl.constexpr,
-    BLOCK: tl.constexpr,
+    PADDED_TABLES: tl.constexpr,
     TOKENS_PER_TILE: tl.constexpr,
 ):
-    lane = tl.arange(0, BLOCK)
-    table = lane // TOKENS_PER_TILE
+    table = tl.arange(0, PADDED_TABLES)
     table_valid = table < TABLES
+    table_order = table // SPLITS + 2
+    factor0 = tl.load(weights + table * N, table_valid, other=0).to(tl.int64)
+    modulus = tl.load(moduli + table, table_valid, other=1).to(tl.int64)
+    offset = tl.load(offsets + table, table_valid, other=0)
+
+    row_offsets = tl.arange(0, TOKENS_PER_TILE)
     for tile in range(tl.program_id(0), tl.cdiv(rows, TOKENS_PER_TILE), tl.num_programs(0)):
-        row = tile * TOKENS_PER_TILE + lane % TOKENS_PER_TILE
-        active = (row < rows) & table_valid
-        token = tl.load(current + row * CURRENT_STRIDE, active, other=0).to(tl.int64)
-        factor = tl.load(weights + table * N, table_valid, other=0).to(tl.int64)
-        hashed = token * factor
-        valid = active
+        row = tile * TOKENS_PER_TILE + row_offsets
+        row_active = row < rows
+        token = tl.load(current + row * CURRENT_STRIDE, row_active, other=0).to(tl.int64)
+        hashed = token[:, None] * factor0[None, :]
+        valid = row_active
         if positions is not None:
-            position = tl.load(positions + row * POSITION_STRIDE, active, other=0)
-            req = tl.load(request_rows + row * REQUEST_STRIDE, active, other=0).to(tl.int64)
+            position = tl.load(positions + row * POSITION_STRIDE, row_active, other=0)
+            req = tl.load(request_rows + row * REQUEST_STRIDE, row_active, other=0).to(tl.int64)
         for delta in tl.static_range(1, N):
             if positions is not None:
                 lookback = position - delta
-                token = tl.load(history + req * HISTORY_ROW + lookback * HISTORY_COL, valid & (lookback >= 0), other=-1)
+                hist_token = tl.load(
+                    history + req * HISTORY_ROW + lookback * HISTORY_COL,
+                    valid & (lookback >= 0),
+                    other=-1,
+                )
             else:
-                token = tl.load(history + row * HISTORY_ROW + (delta - 1) * HISTORY_COL, valid, other=-1)
-            valid = valid & (token >= 0) & (token != eos)
+                hist_token = tl.load(
+                    history + row * HISTORY_ROW + (delta - 1) * HISTORY_COL,
+                    valid,
+                    other=-1,
+                )
+            valid = valid & (hist_token >= 0) & (hist_token != eos)
             factor = tl.load(weights + table * N + delta, table_valid, other=0).to(tl.int64)
-            hashed += tl.where(valid & (delta < table // SPLITS + 2), token.to(tl.int64) * factor, 0)
-        modulus = tl.load(moduli + table, table_valid, other=1).to(tl.int64)
-        offset = tl.load(offsets + table, table_valid, other=0)
-        hashed = hashed % modulus
-        output_index = table * rows + row if positions is not None else row * TABLES + table
-        tl.store(output + output_index, tl.where(hashed < 0, hashed + modulus, hashed) + offset, active)
+            active_term = valid[:, None] & (delta < table_order[None, :])
+            hashed += tl.where(active_term, hist_token.to(tl.int64)[:, None] * factor[None, :], 0)
+        hashed = hashed % modulus[None, :]
+        hashed = tl.where(hashed < 0, hashed + modulus[None, :], hashed) + offset[None, :]
+        out_active = row_active[:, None] & table_valid[None, :]
+        if positions is not None:
+            out_index = table[None, :] * rows + row[:, None]
+        else:
+            out_index = row[:, None] * TABLES + table[None, :]
+        tl.store(output + out_index, hashed, out_active)
 
 
 def over_embedding_ids_triton(input_ids, history, eos_id, weights, moduli, offsets):
@@ -98,7 +114,7 @@ def _launch_over_embedding_ids(input_ids, history, eos_id, weights, moduli, offs
             weights.shape[-1],
             weights.shape[1],
             tables,
-            block,
+            padded_tables,
             tokens_per_tile,
         )
     return output

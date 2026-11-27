@@ -48,6 +48,7 @@ _OE_WEIGHT = re.compile(r"oe_embed_(tokens|proj)([0-9]+)\.weight")
 class LongCat25Embedding(NgramEmbedding):
     def __init__(self, config, word_embeddings):
         super().__init__(config, word_embeddings)
+        self._word_scale = 1.0 / (1 + self.num_embedders)
         ignore = torch.zeros(config.vocab_size, dtype=torch.bool)
         ignore[config.oe_ignored_token_ids] = True
         self.register_buffer("ignore_tokens", ignore, persistent=False)
@@ -83,7 +84,7 @@ class LongCat25Embedding(NgramEmbedding):
         word = self.word_embeddings(input_ids)
         oe = self.oe_embedder(table_ids)
         # The BF16 projection weights have already been scaled at load time.
-        combined = word / (1 + self.num_embedders) + torch.bmm(oe, self.oe_projection).sum(dim=0)
+        combined = word * self._word_scale + torch.bmm(oe, self.oe_projection).sum(dim=0)
         return torch.where(self.ignore_tokens[input_ids, None], word, combined)
 
 
@@ -104,10 +105,10 @@ class LongCat25KeyProjection(nn.Module):
 class LongCat25IndexerNorm(nn.Module):
     def __init__(self, head_dim):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(head_dim))
+        self.weight = nn.Parameter(torch.ones(head_dim, dtype=torch.float32))
 
     def forward(self, x):
-        normalized, _ = torch_npu.npu_rms_norm(x.float(), self.weight.float(), 1e-6)
+        normalized, _ = torch_npu.npu_rms_norm(x.float(), self.weight, 1e-6)
         return normalized.to(x.dtype)
 
 
@@ -117,6 +118,7 @@ class LongCat25MoE(nn.Module):
         self.num_experts = config.n_routed_experts
         self.top_k = config.moe_topk
         self.scale = config.routed_scaling_factor
+        self._cached_route: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self.router = LongcatRouter(config, config.zero_expert_num, torch.float32, prefix=f"{prefix}.router")
         self.experts = FusedMoEFactory(
             num_experts=self.num_experts,
@@ -131,6 +133,10 @@ class LongCat25MoE(nn.Module):
         )
 
     def route_real_experts(self, hidden_states, gating_output, topk, renormalize):
+        cached = self._cached_route
+        if cached is not None and cached[0] is gating_output:
+            self._cached_route = None
+            return cached[1], cached[2]
         weights, ids, _ = self._route(gating_output, topk)
         return weights, ids
 
@@ -139,10 +145,15 @@ class LongCat25MoE(nn.Module):
 
     def forward(self, hidden_states):
         logits = self.router(hidden_states)
-        _, _, identity_weights = self._route(logits, self.top_k)
+        weights, ids, identity_weights = self._route(logits, self.top_k)
         # Add identity slots after FusedMoE's TP/EP reductions, once per token.
         identity = hidden_states * identity_weights.to(hidden_states.dtype).sum(dim=-1, keepdim=True)
-        return self.experts(hidden_states=hidden_states, router_logits=logits) + identity
+        self._cached_route = (logits, weights, ids)
+        try:
+            routed = self.experts(hidden_states=hidden_states, router_logits=logits)
+        finally:
+            self._cached_route = None
+        return routed + identity
 
 
 class LongCat25DecoderLayer(FlashDecoderLayer):

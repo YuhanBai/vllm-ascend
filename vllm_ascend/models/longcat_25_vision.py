@@ -4,6 +4,7 @@
 """The LongCat-2.5 image encoder, shared RVQ, and language projection."""
 
 import math
+from functools import lru_cache
 
 import torch
 from torch import nn
@@ -13,7 +14,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 VISION_NORM_EPS = 1e-6
 ROTARY_THETA = 10_000.0
-RVQ_DISTANCE_CHUNK = 256
+RVQ_DISTANCE_CHUNK = 1024
 
 
 class LongCat25VisionMLP(nn.Module):
@@ -74,6 +75,7 @@ class LongCat25PatchEmbedding(nn.Module):
         return F.linear(pixels.to(device=weight.device, dtype=weight.dtype), weight.flatten(1))
 
 
+@lru_cache(maxsize=64)
 def _vision_layout(height: int, width: int, merge: int, window: int):
     """Return merge-group permutation, rotary coordinates, and window boundaries."""
     patch_positions = torch.arange(height * width, device="cpu").reshape(height, width)
@@ -85,7 +87,7 @@ def _vision_layout(height: int, width: int, merge: int, window: int):
     order = torch.argsort(window_ids.flatten(), stable=True)
     _, counts = torch.unique_consecutive(window_ids.flatten()[order], return_counts=True)
     positions = grouped[order].flatten()
-    return order, positions // width, positions % width, (counts * merge**2).tolist()
+    return order, positions // width, positions % width, tuple((counts * merge**2).tolist())
 
 
 class LongCat25VisionEncoder(nn.Module):
@@ -166,11 +168,13 @@ class LongCat25VisualQuantizer(nn.Module):
     def forward(self, hidden):
         residual = self.quant_conv(hidden).float()
         codebook = self.codebook
-        norms = codebook.square().sum(-1)
+        # ||x - c||^2 / 2 = ||x||^2 / 2 + (||c||^2 / 2 - x @ c^T); ||x||^2 is constant for argmin.
+        half_norms = 0.5 * codebook.square().sum(-1)
+        neg_codebook_t = (-codebook).T.contiguous()
         indices = []
         for _ in range(self.depth):
             nearest = [
-                (chunk.square().sum(-1, keepdim=True) + norms - (2 * chunk) @ codebook.T).argmin(dim=-1)
+                torch.addmm(half_norms, chunk, neg_codebook_t).argmin(dim=-1)
                 for chunk in residual.split(RVQ_DISTANCE_CHUNK)
             ]
             level = torch.cat(nearest)

@@ -65,12 +65,14 @@ def _media_patches(frames: Sequence[Frame], config: dict) -> tuple[torch.Tensor,
     images = [frame if isinstance(frame, Image.Image) else to_pil_image(frame) for frame in frames]
     h, w = _resize_image(images[0].height, images[0].width, config)
     patch, merge, temporal = (config[key] for key in ("patch_size", "spatial_merge_size", "temporal_patch_size"))
-    mean = np.asarray(config["image_mean"])[:, None, None]
-    std = np.asarray(config["image_std"])[:, None, None]
+    mean = np.asarray(config["image_mean"], dtype=np.float32)[:, None, None]
+    inv_std = np.float32(1.0) / np.asarray(config["image_std"], dtype=np.float32)[:, None, None]
+    scale = np.float32(1.0 / 255.0)
     pixels = []
     for image in images:
         resized = image.convert("RGB").resize((w, h), resample=Image.Resampling.BICUBIC)
-        pixels.append((np.asarray(resized).transpose(2, 0, 1) / 255.0 - mean) / std)
+        arr = np.asarray(resized, dtype=np.float32).transpose(2, 0, 1)
+        pixels.append((arr * scale - mean) * inv_std)
     pixels.extend([pixels[-1]] * (-len(pixels) % temporal))
     grid_t = len(pixels) // temporal
     grid_h, grid_w = h // patch, w // patch

@@ -104,9 +104,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def supports_fused_activation(self, activation) -> bool:
         return False
 
-    def _transpose_expert_weights(self, weight: torch.Tensor) -> torch.Tensor:
+    def _transpose_expert_weights(self, weight: torch.Tensor, *, in_place: bool = True) -> torch.Tensor:
         weight = self._maybe_pad_weight(weight)
-        if not self._chunked_pp_expert_transpose or not weight.is_contiguous():
+        if not (in_place and self._chunked_pp_expert_transpose) or not weight.is_contiguous():
             return weight.transpose(1, 2).contiguous()
 
         # Each expert owns an independent storage region. Copy one transposed
@@ -127,7 +127,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # reuse storage in the same place that chooses the expert weight format.
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
-            transposed = self._transpose_expert_weights(weight.data)
+            needs_fresh_storage = weight.shape[1] != weight.shape[2] and (
+                enable_fused_mc2 or _should_trans_nz(weight.data)
+            )
+            transposed = self._transpose_expert_weights(weight.data, in_place=not needs_fresh_storage)
             if weight.shape != transposed.shape and (enable_fused_mc2 or _should_trans_nz(transposed)):
                 # NZ packing reads the NPU storage's base shape. Reusing the
                 # pre-transpose storage here would pack a rectangular matrix

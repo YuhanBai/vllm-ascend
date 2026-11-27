@@ -38,7 +38,7 @@ def lightning_indexer_with_mandatory_tokens(
     )
     # Padded graph rows after the last query have a nonpositive valid length.
     rows = torch.arange(query.shape[0], dtype=torch.int32, device=query.device)
-    sequence = (rows[:, None] >= actual_seq_lengths_query[None, :]).sum(-1)
+    sequence = torch.searchsorted(actual_seq_lengths_query, rows, right=True)
     in_batch = sequence < actual_seq_lengths_query.numel()
     sequence = sequence.clamp(max=actual_seq_lengths_query.numel() - 1)
     valid_len = actual_seq_lengths_key[sequence] - actual_seq_lengths_query[sequence] + rows + 1

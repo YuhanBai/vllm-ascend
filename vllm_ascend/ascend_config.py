@@ -2025,8 +2025,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
-        # LongCat model code reads this switch from VllmConfig.additional_config.
+        # LongCat model code reads these switches from VllmConfig.additional_config.
         "longcat_indexer_triton",
+        "longcat_oe_host_uva",
         # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
         # backend selector; Ascend supports only the triton value (FLA kernels
         # run via triton-ascend), and the triton default applies either way

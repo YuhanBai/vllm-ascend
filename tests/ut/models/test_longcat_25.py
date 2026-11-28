@@ -49,7 +49,8 @@ def test_identity_routes_are_removed_from_dispatch_without_renormalizing():
     bias = torch.tensor([0.0, 0.0, 0.0, 1.0])
     weights, ids, identity = route_experts(logits, bias, topk=2, num_experts=3, scale=9)
     probs = logits.softmax(dim=-1) * 9
-    assert ids.tolist() == [[0, 0]]
+    row = ids[0].tolist()
+    assert 0 in row and len(set(row)) == 2 and all(0 <= x < 3 for x in row)
     torch.testing.assert_close(weights.sum(dim=-1), probs[:, 0])
     torch.testing.assert_close(identity.sum(dim=-1), probs[:, 3])
 
@@ -185,3 +186,37 @@ def test_image_embeddings_replace_only_placeholders_in_over_embedding_buffer(mon
     assert result.data_ptr() == state._graph_embeds.data_ptr()
     torch.testing.assert_close(result, torch.tensor([[1.0, 2.0], [8.0, 9.0], [5.0, 6.0], [0.0, 0.0]]))
     assert state.prepare_inputs(batch, None) == {}
+
+
+def test_identity_routes_spread_across_experts_for_multitoken_batch():
+    # 6 tokens selecting 1 real expert (0) and 2 identity experts (6, 7) out of num_experts=6.
+    logits = torch.tensor([[5.0, -5.0, -5.0, -5.0, -5.0, -5.0, 4.0, 3.0]] * 6)
+    bias = torch.zeros(8)
+    weights, ids, identity = route_experts(logits, bias, topk=3, num_experts=6, scale=9)
+    assert ((weights == 0).sum(dim=-1) == 2).all()
+    assert ((identity > 0).sum(dim=-1) == 2).all()
+    assert (ids >= 0).all() and (ids < 6).all()
+    # Every row must have strictly distinct expert IDs (MC2 precondition).
+    for row in ids.tolist():
+        assert 0 in row and len(set(row)) == 3
+    # Dummy IDs across the batch should spread across multiple experts.
+    dummy_ids = ids[weights == 0].tolist()
+    assert len(set(dummy_ids)) >= 4
+
+
+def test_mtp_weight_name_normalization():
+    from vllm_ascend.models.longcat_25_mtp import normalize_mtp_weight_name
+
+    assert normalize_mtp_weight_name("model.mtp.embed_tokens.weight") == "model.embed_tokens.weight"
+    assert normalize_mtp_weight_name("model.mtp.norm.weight") == "model.norm.weight"
+    assert normalize_mtp_weight_name("model.mtp.oe_embed_tokens0.weight") is None
+    assert normalize_mtp_weight_name("model.mtp.layers.0.enorm.m.weight") == "model.mtp_layer.enorm.weight"
+    assert normalize_mtp_weight_name("model.mtp.layers.0.hnorm.m.weight") == "model.mtp_layer.hnorm.weight"
+    assert (
+        normalize_mtp_weight_name("model.mtp.layers.0.transformer_layer.mlp.gate_proj.weight")
+        == "model.mtp_layer.mlp.gate_proj.weight"
+    )
+    assert (
+        normalize_mtp_weight_name("model.mtp.layers.0.self_attn.indexer.wk.weight")
+        == "model.mtp_layer.self_attn.indexer.wk_weights_proj.wk.weight"
+    )

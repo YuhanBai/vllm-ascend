@@ -33,6 +33,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 from vllm_ascend.models.longcat_25_ops import (
     get_longcat_lightning_indexer,
@@ -46,12 +47,31 @@ _OE_WEIGHT = re.compile(r"oe_embed_(tokens|proj)([0-9]+)\.weight")
 
 
 class LongCat25Embedding(NgramEmbedding):
-    def __init__(self, config, word_embeddings):
+    def __init__(self, config, word_embeddings, *, host_uva: bool = False):
         super().__init__(config, word_embeddings)
         self._word_scale = 1.0 / (1 + self.num_embedders)
+        self._host_uva = host_uva
+        self._host_oe_weight: torch.Tensor | None = None
+        self._uva_bound = False
         ignore = torch.zeros(config.vocab_size, dtype=torch.bool)
         ignore[config.oe_ignored_token_ids] = True
         self.register_buffer("ignore_tokens", ignore, persistent=False)
+
+    def _ensure_host_oe_buffer(self, dtype: torch.dtype) -> torch.Tensor:
+        if self._host_oe_weight is None:
+            shape = self.oe_embedder.weight.shape
+            self._host_oe_weight = torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+            # Release HBM backing storage immediately so PP Stage 0 reclaims ~31 GiB/card.
+            self.oe_embedder.weight.data = torch.empty(0, dtype=dtype, device=self.oe_embedder.weight.device)
+            self._uva_bound = False
+        return self._host_oe_weight
+
+    def bind_uva_weight(self) -> None:
+        if not self._host_uva or self._host_oe_weight is None or self._uva_bound:
+            return
+        uva_view = get_accelerator_view_from_cpu_tensor(self._host_oe_weight)
+        self.oe_embedder.weight.data = uva_view
+        self._uva_bound = True
 
     def load_weight(self, weight_name, loaded_weight):
         # The upstream OE loader writes slices directly. During layerwise
@@ -59,6 +79,19 @@ class LongCat25Embedding(NgramEmbedding):
         # physical parameter so finalization retains the graph-bound storage.
         token_key = "ngram_embeddings.embedders."
         proj_key = "ngram_embeddings.post_projs."
+        if weight_name.startswith(token_key) and self._host_uva:
+            index = int(weight_name[len(token_key) :].split(".")[0])
+            lo, hi = self._offsets[index : index + 2]
+            assert hi - lo == loaded_weight.shape[0]
+            host_buf = self._ensure_host_oe_buffer(loaded_weight.dtype)
+            shard = self.oe_embedder.shard_indices
+            start = max(lo, shard.org_vocab_start_index)
+            end = min(hi, shard.org_vocab_end_index)
+            if start < end:
+                host_buf[start - shard.org_vocab_start_index : end - shard.org_vocab_start_index].copy_(
+                    loaded_weight[start - lo : end - lo].to(device="cpu", dtype=host_buf.dtype)
+                )
+            return "ngram_embeddings.oe_embedder.weight"
         if weight_name.startswith(token_key) and self.oe_embedder.weight.is_meta:
             index = int(weight_name[len(token_key) :].split(".")[0])
             lo, hi = self._offsets[index : index + 2]
@@ -81,6 +114,8 @@ class LongCat25Embedding(NgramEmbedding):
         return super().load_weight(weight_name, loaded_weight)
 
     def embed_batched(self, input_ids, table_ids):
+        if self._host_uva and not self._uva_bound:
+            self.bind_uva_weight()
         word = self.word_embeddings(input_ids)
         oe = self.oe_embedder(table_ids)
         # The BF16 projection weights have already been scaled at load time.
@@ -113,7 +148,7 @@ class LongCat25IndexerNorm(nn.Module):
 
 
 class LongCat25MoE(nn.Module):
-    def __init__(self, config, prefix, enable_eplb):
+    def __init__(self, config, prefix, enable_eplb, quant_config=None):
         super().__init__()
         self.num_experts = config.n_routed_experts
         self.top_k = config.moe_topk
@@ -128,6 +163,7 @@ class LongCat25MoE(nn.Module):
             renormalize=False,
             custom_routing_function=self.route_real_experts,
             router_logits_dtype=torch.float32,
+            quant_config=quant_config,
             prefix=f"{prefix}.experts",
             enable_eplb=enable_eplb,
         )
@@ -182,6 +218,7 @@ class LongCat25DecoderLayer(FlashDecoderLayer):
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=config.max_position_embeddings,
                 cache_config=vllm_config.cache_config,
+                quant_config=vllm_config.quant_config,
                 # vLLM's sparse MLA extracts one integer from its runtime
                 # name. ModuleList keeps the checkpoint's self_attn.{i} path.
                 prefix=f"{prefix}.self_attn_{i}",
@@ -211,10 +248,21 @@ class LongCat25DecoderLayer(FlashDecoderLayer):
             RMSNorm(config.hidden_size, eps=config.rms_norm_eps) for _ in range(2)
         )
         self.mlps = nn.ModuleList(
-            FlashMLP(config.hidden_size, config.intermediate_size, config.hidden_act, prefix=f"{prefix}.mlps.{i}")
+            FlashMLP(
+                config.hidden_size,
+                config.intermediate_size,
+                config.hidden_act,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.mlps.{i}",
+            )
             for i in range(2)
         )
-        self.mlp = LongCat25MoE(config, f"{prefix}.mlp", vllm_config.parallel_config.enable_eplb)
+        self.mlp = LongCat25MoE(
+            config,
+            f"{prefix}.mlp",
+            vllm_config.parallel_config.enable_eplb,
+            quant_config=vllm_config.quant_config,
+        )
 
 
 class LongCat25Model(FlashModel):
@@ -224,14 +272,19 @@ class LongCat25Model(FlashModel):
         self.do_not_compile = True
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.quant_config = None
+        self.quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.ngram_embeddings = None
+        additional_config = vllm_config.additional_config or {}
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size, config.hidden_size, prefix=f"{prefix}.embed_tokens"
             )
-            self.ngram_embeddings = LongCat25Embedding(config, self.embed_tokens)
+            self.ngram_embeddings = LongCat25Embedding(
+                config,
+                self.embed_tokens,
+                host_uva=bool(additional_config.get("longcat_oe_host_uva", False)),
+            )
         else:
             self.embed_tokens = PPMissingLayer()
 
@@ -241,7 +294,7 @@ class LongCat25Model(FlashModel):
             device=vllm_config.device_config.device,
         )
         indexer_op = get_longcat_lightning_indexer(
-            use_triton=(vllm_config.additional_config or {}).get("longcat_indexer_triton", False)
+            use_triton=additional_config.get("longcat_indexer_triton", False)
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_layers,
@@ -274,11 +327,13 @@ class LongCat25Model(FlashModel):
                 yield name, weight
 
         loaded.update(super().load_weights(language_weights()))
+        if self.ngram_embeddings is not None:
+            self.ngram_embeddings.bind_uva_weight()
         return loaded
 
 
 class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
-    """BF16 text generation from the official LongCat-2.5 checkpoint."""
+    """LongCat-2.5 text generation (BF16 / quantized, optional MTP and OE Host UVA)."""
 
     IPC_SKIPPED_CHECKPOINT_PREFIXES = ("model.mtp.", "model.visual_model.", "model.visual_bridge_model.")
     IPC_HOST_BUFFER_PREFIXES = ("model.layers.",)
@@ -287,11 +342,16 @@ class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         self.config = config
-        self.quant_config = None
+        self.quant_config = vllm_config.quant_config
         self._validate_config(vllm_config)
         self.model = LongCat25Model(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, prefix=maybe_prefix(prefix, "lm_head"))
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -302,12 +362,8 @@ class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
         model = vllm_config.model_config
         config = model.hf_config
         parallel = vllm_config.parallel_config
-        if (
-            model.dtype != torch.bfloat16
-            or vllm_config.quant_config is not None
-            or getattr(config, "compression_config", None)
-        ):
-            raise ValueError("LongCat-2.5 on Ascend currently requires the original BF16 checkpoint.")
+        if model.dtype not in (torch.bfloat16, torch.float16):
+            raise ValueError("LongCat-2.5 on Ascend requires BF16 or FP16 activation dtype.")
         if (config.cli_factor, config.index_k_norm_type, config.zero_expert_type) != (2, "rms", "identity"):
             raise ValueError("Expected LongCat-2.5 paired MLA, RMS index normalization and identity experts.")
         compilation = vllm_config.compilation_config
@@ -319,15 +375,17 @@ class AscendLongCat25ForCausalLM(LongcatFlashForCausalLM):
                 "LongCat-2.5 requires --enforce-eager or "
                 '--compilation-config \'{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY"}\'.'
             )
+        spec_config = vllm_config.speculative_config
+        if spec_config is not None and spec_config.method != "mtp":
+            raise ValueError(f"LongCat-2.5 speculative decoding currently only supports method='mtp', got {spec_config.method!r}.")
         if (
-            vllm_config.speculative_config is not None
-            or vllm_config.kv_transfer_config is not None
+            vllm_config.kv_transfer_config is not None
             or parallel.prefill_context_parallel_size > 1
             or parallel.decode_context_parallel_size > 1
             or enable_sp(vllm_config)
         ):
             raise ValueError(
-                "LongCat-2.5 text inference requires local KV and disables speculation, "
+                "LongCat-2.5 text inference requires local KV and disables "
                 "context parallelism and sequence parallelism."
             )
         if vllm_config.cache_config.cache_dtype not in (

@@ -18,7 +18,19 @@ def route_experts(logits, bias, topk, num_experts, scale):
     expert_ids = (probs + bias).topk(topk, dim=-1, sorted=False).indices
     weights = probs.gather(-1, expert_ids) * scale
     identity = expert_ids >= num_experts
-    return weights.masked_fill(identity, 0), expert_ids.masked_fill(identity, 0), weights.masked_fill(~identity, 0)
+    # Spread zero-weight identity placeholders evenly across [0, num_experts)
+    # while guaranteeing every row's top-k IDs are strictly distinct (required
+    # by MC2 npu_moe_distribute_dispatch_v2 / combine_v2).
+    m = min(2 * topk, num_experts)
+    token_offset = torch.arange(expert_ids.shape[0], device=expert_ids.device, dtype=expert_ids.dtype)[:, None]
+    base = (token_offset * 67 + expert_ids[:, :1] * 13).remainder(num_experts)
+    cand = (base + torch.arange(m, device=expert_ids.device, dtype=expert_ids.dtype)[None, :]).remainder(num_experts)
+    real_only = expert_ids.masked_fill(identity, -1)
+    collides = (cand[:, :, None] == real_only[:, None, :]).any(dim=-1)
+    free_dummies = cand.gather(-1, collides.to(torch.int32).argsort(dim=-1, stable=True))
+    id_rank = (identity.to(torch.int32).cumsum(dim=-1) - 1).clamp_min(0)
+    routed_ids = torch.where(identity, free_dummies.gather(-1, id_rank), expert_ids)
+    return weights.masked_fill(identity, 0), routed_ids, weights.masked_fill(~identity, 0)
 
 
 def over_embedding_ids(input_ids, history, eos_id, weights, moduli, offsets):

@@ -16,4 +16,6 @@ class LongCat25ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 
 _CONFIG_REGISTRY.setdefault(LongCat25Config.model_type, LongCat25Config)
+_CONFIG_REGISTRY.setdefault("longcat_25_mtp", LongCat25Config)
 MODEL_ARCH_CONFIG_CONVERTORS.setdefault(LongCat25Config.model_type, LongCat25ModelArchConfigConvertor)
+MODEL_ARCH_CONFIG_CONVERTORS.setdefault("longcat_25_mtp", LongCat25ModelArchConfigConvertor)

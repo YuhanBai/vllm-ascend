@@ -46,6 +46,10 @@ class LongCat25Config(PretrainedConfig):
             **(rope_parameters or rope_scaling or {}),
         }
         self.use_index_cache = True
+        if hasattr(self, "moe_topk") and not hasattr(self, "num_experts_per_tok"):
+            self.num_experts_per_tok = self.moe_topk
+        if hasattr(self, "mtp_num_layers") and not hasattr(self, "num_nextn_predict_layers"):
+            self.num_nextn_predict_layers = self.mtp_num_layers
 
     @property
     def oe_ignored_token_ids(self) -> list[int]:

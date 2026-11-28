@@ -128,6 +128,16 @@ def _normalize_legacy_qwen3_dspark_config(
                 "architectures": ["Glm5NextMTPModel"],
             }
         )
+    if hf_config.model_type == "pro_v":
+        n_predict = getattr(hf_config, "mtp_num_layers", 1)
+        hf_config.model_type = "longcat_25_mtp"
+        hf_config.update(
+            {
+                "n_predict": n_predict,
+                "num_nextn_predict_layers": n_predict,
+                "architectures": ["LongCat25MTPModel"],
+            }
+        )
     if legacy_qwen3_dspark:
         dflash_config = hf_config.dflash_config
         hf_config.update(
@@ -247,5 +257,6 @@ def _normalize_glm_mla_dspark(self):
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
 
-if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
-    speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), "glm5_next_mtp")]
+for _mtp_type in ("glm5_next_mtp", "longcat_25_mtp"):
+    if _mtp_type not in get_args(speculative_config.MTPModelTypes):
+        speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), _mtp_type)]

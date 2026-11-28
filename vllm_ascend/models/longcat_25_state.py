@@ -122,6 +122,7 @@ class LongCat25ModelState(AscendModelState):
             if text_indices.numel() == 0:
                 return torch.empty((num_tokens, self.inputs_embeds_size), dtype=self.dtype, device=self.device)
             if text_indices.numel() < num_tokens:
+                text_indices = text_indices.to(device=input_ids.device, non_blocking=True)
                 input_ids = input_ids.index_select(0, text_indices)
                 positions = positions.index_select(0, text_indices)
                 rows = rows.index_select(0, text_indices)

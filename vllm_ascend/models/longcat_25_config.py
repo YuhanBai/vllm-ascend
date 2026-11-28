@@ -27,7 +27,10 @@ class LongCat25Config(PretrainedConfig):
         # The published auto_map names Python files absent from the checkpoint.
         kwargs.pop("auto_map", None)
         kwargs.setdefault("dtype", "bfloat16")
+        kwargs.setdefault("pad_token_id", None)
         super().__init__(**kwargs)
+        if not hasattr(self, "pad_token_id"):
+            self.pad_token_id = None
         self.num_layers = self.num_hidden_layers = num_layers
         self.ffn_hidden_size = self.intermediate_size = ffn_hidden_size
         self.expert_ffn_hidden_size = self.moe_intermediate_size = expert_ffn_hidden_size

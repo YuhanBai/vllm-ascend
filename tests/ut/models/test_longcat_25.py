@@ -127,7 +127,7 @@ def test_decode_graph_reuses_over_embedding_storage(monkeypatch):
         ne_weights=torch.tensor([[[1, 10]]], dtype=torch.int32),
         ne_mods=torch.tensor([[13]], dtype=torch.int32),
         exclusive_sizes=torch.tensor([0, 13], dtype=torch.int32),
-        embed_batched=lambda tokens, ids: torch.stack((tokens, ids[:, 0]), dim=1).float(),
+        embed_batched=lambda tokens, ids: torch.stack((tokens, ids[0]), dim=1).float(),
     )
     model = SimpleNamespace(model=SimpleNamespace(ngram_embeddings=embedding))
     state = LongCat25ModelState(config, model, None, torch.device("cpu"))

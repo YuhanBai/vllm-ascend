@@ -105,7 +105,7 @@ class LongCat25ModelState(AscendModelState):
         compute_from_token_table = self._over_embedding_ids_from_token_table
         skip_mask = getattr(self, "_mm_skip_mask", None)
         # Equal batch counts alone can also occur with empty or multi-token requests.
-        offsets_cpu = input_batch.query_start_loc_np
+        offsets_cpu = getattr(input_batch, "query_start_loc_np", None)
         if (
             skip_mask is not None
             or compute_from_token_table is None
